@@ -15,7 +15,7 @@ public_url = os.getenv("HH520_PUBLIC_URL", "").strip().rstrip("/")
 app = FastAPI(
     title="HH520 Insight AI",
     description="重新采集历史数据、屏蔽目标赛果与赛后信息、按 HH520 V2.1-Test 重新预测，再生成回测与改进建议；不会自动修改预测模型。",
-    version="Backtest V1.1 Replay",
+    version="Backtest V1.2 Evaluation Fix",
     servers=[{"url": public_url}] if public_url else None,
 )
 security = HTTPBearer(auto_error=False)
@@ -80,6 +80,7 @@ class ReplayAnalysisPageResponse(BaseModel):
     total_matches: int
     matches: list[dict]
     required_module_order: list[str]
+    date_rule: str | None = None
 
 
 class ReplayPredictionItem(BaseModel):
@@ -151,7 +152,7 @@ class ReportResponse(BaseModel):
 
 @app.get("/health", operation_id="healthCheck", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.1 Replay"}
+    return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.2 Evaluation Fix"}
 
 
 @app.post(
@@ -217,7 +218,7 @@ def get_replay_task(task_id: str, _: None = Security(require_token)) -> dict:
     return _prediction_request("GET", f"/v1/tasks/{task_id}")
 
 
-@app.get("/replay/tasks/{task_id}/analysis-page", operation_id="getReplayAnalysisPage", summary="读取最多两场已脱敏的赛前证据", response_model=ReplayAnalysisPageResponse)
+@app.get("/replay/tasks/{task_id}/analysis-page", operation_id="getReplayAnalysisPage", summary="读取最多两场已脱敏赛前证据；源网站日期目录为日期最高优先级", response_model=ReplayAnalysisPageResponse)
 def get_replay_analysis_page(task_id: str, cursor: int = 0, _: None = Security(require_token)) -> dict:
     return _prediction_request("GET", f"/v1/tasks/{task_id}/analysis-page?cursor={cursor}")
 

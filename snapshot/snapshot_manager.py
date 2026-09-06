@@ -31,6 +31,7 @@ class SnapshotManager:
             pollution_status=status,
             created_time=datetime.now(timezone.utc).isoformat(),
             matches=sanitized_matches,
+            excluded_matches=candidate.get("excluded_matches", []),
             pollution_audit=audits,
         )
         payload = snapshot.as_dict()

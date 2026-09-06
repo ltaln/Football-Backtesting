@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 
 from collector.collector_adapter import CollectorAdapter
+from collector.football_ai_adapter import _htft, _result
 from core.command_parser import CommandError, parse_command
 from core.config import Settings
 from core.task_manager import TaskManager
@@ -21,6 +23,19 @@ MATCH = {
 class StaticCollector(CollectorAdapter):
     def collect_history(self, start_date: date, end_date: date) -> dict:
         return {"source": "test", "version": "1.0", "matches": [MATCH]}
+
+
+class EmptyCollector(CollectorAdapter):
+    def collect_history(self, start_date: date, end_date: date) -> dict:
+        return {"source": "test", "version": "1.0", "matches": []}
+
+
+class PartialCollector(CollectorAdapter):
+    def collect_history(self, start_date: date, end_date: date) -> dict:
+        unavailable = deepcopy(MATCH)
+        unavailable["match_id"] = "TEST-002"
+        unavailable["prediction"] = {"score_top2": [], "htft": [], "result": {"result": [], "confidence": "unknown"}, "goal": {"exact": None, "range": []}}
+        return {"source": "test", "version": "1.2", "matches": [MATCH, unavailable]}
 
 
 class MVPTests(unittest.TestCase):
@@ -56,6 +71,38 @@ class MVPTests(unittest.TestCase):
         self.assertNotIn("post_match_news", clean)
         self.assertIn("post_match_status", clean)
         self.assertIn("post_match_status", audit["downgraded"])
+
+    def test_5_strict_result_and_top3_htft_parsing(self):
+        match = "示例主队 vs 示例客队"
+        self.assertEqual(_result("胜平负：主胜", match), ["H"])
+        self.assertEqual(_result("胜平负：客胜", match), ["A"])
+        self.assertEqual(_result("胜平负：平", match), ["D"])
+        self.assertEqual(_result("胜平负：示例客队胜（低优势）", match), ["A"])
+        self.assertEqual(_result("胜平负：PASS（资料不足）", match), [])
+        self.assertEqual(len(_htft("半全场 Top3：胜/胜 / 平/胜 / 平/平")), 3)
+
+    def test_6_failed_previous_range_blocks_next_but_allows_retry(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        settings = Settings(database_path=root / "db.sqlite3", snapshot_dir=root / "snapshots", archive_dir=root / "archive", report_dir=root / "reports", log_path=root / "test.log")
+        with self.assertRaisesRegex(ValueError, "NO_MATCHES_IN_DATE_RANGE"):
+            TaskManager(settings, EmptyCollector()).run("回测 2026-08-01 全部比赛")
+        with self.assertRaisesRegex(ValueError, "PREVIOUS_BACKTEST_ERROR_UNRESOLVED"):
+            TaskManager(settings, StaticCollector()).run("回测 2026-08-02 全部比赛")
+        report = TaskManager(settings, StaticCollector()).run("回测 2026-08-01 全部比赛")
+        self.assertEqual(report["status"], "REPORT_READY")
+
+    def test_7_not_evaluable_predictions_do_not_enter_metric_denominators(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        settings = Settings(database_path=root / "db.sqlite3", snapshot_dir=root / "snapshots", archive_dir=root / "archive", report_dir=root / "reports", log_path=root / "test.log")
+        report = TaskManager(settings, PartialCollector()).run("回测 2026-08-01 全部比赛")
+        self.assertEqual(report["summary"]["total_matches"], 2)
+        self.assertEqual(report["summary"]["valid_matches"], 1)
+        self.assertEqual(report["summary"]["metric_samples"]["result"], 1)
+        self.assertEqual(report["summary"]["result_accuracy"], 1.0)
 
 
 if __name__ == "__main__":

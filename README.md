@@ -2,6 +2,8 @@
 
 独立足球预测回测系统。现行规则为：每次任务重新采集指定历史日期的数据，先屏蔽目标比赛的比分、赛果和开赛后数据，再按冻结的 HH520 V2.1-Test 流程重新预测；预测完成后才读取真实赛果、评价误差并生成改进建议。不会自动修改模型参数、权重或配置。
 
+当前评价版本为 `1.2`：PASS/无法解析项目不进入对应指标分母；半全场按 Top3 覆盖评价；总进球同时保留精确与区间口径；赛果仅接受严格主胜/平/客胜或经主客队身份核对的获胜球队。
+
 > Backtest validates prediction. Backtest does not change prediction.
 
 ## 一条命令使用
@@ -28,6 +30,8 @@ python main.py
 最多 7 个自然日；超过限制返回 `BACKTEST_WINDOW_LIMIT_EXCEEDED`，不会自动拆分。
 
 回测不设固定时间，也不自动定时执行；开始日期、结束日期和执行时机完全由用户在手机 GPT 命令中决定。
+
+同一日期未完成的回测命令会续用原任务。前一回测失败或尚未完成时，后续日期任务被拒绝；修复后允许重试原日期。
 
 正式手机接入与 Docker 部署见 [`docs/MOBILE_COMMAND.md`](docs/MOBILE_COMMAND.md)。
 
@@ -83,15 +87,17 @@ collect_history(start_date, end_date) -> HistoricalSnapshot candidate
 
 清洗仅作用于 `prediction_input`。真实赛果留在独立的 `actual` 区域，直到评价阶段才使用。
 
+日期校验第 1 层（最高优先级）为源网站日期目录，例如 `https://www.hh520.com/?date=20260716`。该目录下即使比赛在次日凌晨开赛，仍归属于 `2026-07-16`，不得仅按自然日时间判为日期不符。第 2、3 层规则待用户确认后补充。
+
 ## 评价口径
 
 - Score：`exact_hit`（Top2 覆盖）、`near_hit`（与任一 Top2 只差一个进球）、`direction_hit`（Top1 胜平负方向）
-- HTFT：`half_hit`、`transition_hit`、`overall_hit`
+- HTFT：`half_hit`、`transition_hit`、`top1_overall_hit`、Top3 `overall_hit`
 - Result：`hit`、`confidence_bucket`（0–49、50–64、65–79、80–100）
-- Goal：`exact`、`range`
+- Goal：`exact`、`range`；主报告使用有实际输出的区间命中率
 - Error：仅在存在未命中时分类为 `DATA_ERROR`、`MARKET_ERROR`、`TEAM_STATE_ERROR`、`GAME_FLOW_ERROR` 或 `RANDOM_EVENT`
 
-总结报告包含总场次、比分/半全场/赛果/进球准确率与置信度分桶表现。V1 不计算投注 ROI。
+总结报告包含原始场次、有效场次、各指标独立样本数、源结果缺失数、比分/半全场/赛果/进球准确率与置信度分桶表现。PASS 和不可评价结果不会伪造命中或进入对应指标分母。V1 不计算投注 ROI。
 
 每份报告同时包含中文 `report_markdown` 和结构化 `improvement_plan`。改进方案根据实际错误分布和指标生成，只提出复核方向；少于 100 场时明确禁止修改模型，任何情况下都不会自动应用参数变化。
 

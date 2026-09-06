@@ -10,6 +10,7 @@ class HistoricalSnapshot:
     pollution_status: str
     created_time: str
     matches: list[dict] = field(default_factory=list)
+    excluded_matches: list[dict] = field(default_factory=list)
     pollution_audit: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:

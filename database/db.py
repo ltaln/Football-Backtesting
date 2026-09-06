@@ -45,6 +45,13 @@ class Database:
 
     def create_task(self, task: BacktestTask) -> None:
         with self.session() as db:
+            previous = db.execute("SELECT * FROM backtest_tasks ORDER BY created_time DESC LIMIT 1").fetchone()
+            if previous:
+                same_range = previous["start_date"] == task.start_date and previous["end_date"] == task.end_date
+                if previous["status"] == "FAILED" and not same_range:
+                    raise ValueError(f"PREVIOUS_BACKTEST_ERROR_UNRESOLVED:{previous['task_id']}")
+                if previous["status"] not in {"FAILED", "REPORT_READY", "CANCELLED", "INVALIDATED"}:
+                    raise ValueError(f"PREVIOUS_BACKTEST_NOT_FINISHED:{previous['task_id']}:{previous['status']}")
             db.execute("INSERT INTO backtest_tasks VALUES (?, ?, ?, ?, ?, ?)", tuple(task.as_dict().values()))
 
     def update_task(self, task_id: str, status: str, snapshot_id: str | None = None) -> None:

@@ -13,29 +13,50 @@ class ReportEngine:
         self.advisor = ImprovementAdvisor()
 
     @staticmethod
-    def _rate(records: list[dict], section: str, field: str) -> float:
-        return round(sum(bool(item["evaluation"][section][field]) for item in records) / len(records), 4) if records else 0.0
+    def _eligible(records: list[dict], section: str, eligibility: str = "evaluable") -> list[dict]:
+        return [item for item in records if item["evaluation"][section].get(eligibility)]
+
+    @classmethod
+    def _rate(cls, records: list[dict], section: str, field: str, eligibility: str = "evaluable") -> float:
+        eligible = cls._eligible(records, section, eligibility)
+        return round(sum(bool(item["evaluation"][section][field]) for item in eligible) / len(eligible), 4) if eligible else 0.0
 
     def build(self, task: dict, snapshot: dict, records: list[dict]) -> dict:
         confidence: dict[str, dict[str, int | float]] = defaultdict(lambda: {"matches": 0, "hits": 0})
-        for item in records:
+        for item in self._eligible(records, "result"):
             bucket = item["evaluation"]["result"]["confidence_bucket"]
             confidence[bucket]["matches"] += 1
             confidence[bucket]["hits"] += int(item["evaluation"]["result"]["hit"])
         for values in confidence.values():
             values["accuracy"] = round(values["hits"] / values["matches"], 4) if values["matches"] else 0.0
+        metric_samples = {
+            "score": len(self._eligible(records, "score")),
+            "htft": len(self._eligible(records, "htft")),
+            "result": len(self._eligible(records, "result")),
+            "goal_exact": len(self._eligible(records, "goal", "exact_evaluable")),
+            "goal_range": len(self._eligible(records, "goal", "range_evaluable")),
+        }
+        valid_matches = sum(any(item["evaluation"][section].get("evaluable") for section in ("score", "htft", "result", "goal")) for item in records)
         summary = {
             "total_matches": len(records),
+            "valid_matches": valid_matches,
+            "not_evaluable_matches": len(records) - valid_matches,
+            "source_excluded_matches": len(snapshot.get("excluded_matches", [])),
+            "metric_samples": metric_samples,
             "score_accuracy": self._rate(records, "score", "exact_hit"),
             "htft_accuracy": self._rate(records, "htft", "overall_hit"),
+            "htft_top1_accuracy": self._rate(records, "htft", "top1_overall_hit"),
             "result_accuracy": self._rate(records, "result", "hit"),
-            "goal_accuracy": self._rate(records, "goal", "exact"),
+            "goal_accuracy": self._rate(records, "goal", "range", "range_evaluable"),
+            "goal_range_accuracy": self._rate(records, "goal", "range", "range_evaluable"),
+            "goal_exact_accuracy": self._rate(records, "goal", "exact", "exact_evaluable"),
             "confidence_performance": dict(confidence),
         }
         improvement_plan = self.advisor.build(summary, records)
         report = {
             "task_id": task["task_id"],
             "status": "REPORT_READY",
+            "evaluation_version": "1.2",
             "snapshot_id": snapshot["snapshot_id"],
             "date_range": snapshot["date_range"],
             "pollution_status": snapshot["pollution_status"],
@@ -56,11 +77,12 @@ class ReportEngine:
             "",
             f"- 任务：{report['task_id']}",
             f"- 日期：{report['date_range']}",
-            f"- 有效比赛：{summary['total_matches']}",
+            f"- 匹配到赛果记录：{summary['total_matches']}",
+            f"- 至少一项可评价：{summary['valid_matches']}（完全不可评价：{summary['not_evaluable_matches']}；源结果缺失：{summary['source_excluded_matches']}）",
             f"- 比分准确率：{summary['score_accuracy']:.1%}",
-            f"- 半全场准确率：{summary['htft_accuracy']:.1%}",
+            f"- 半全场 Top3 覆盖率：{summary['htft_accuracy']:.1%}",
             f"- 赛果准确率：{summary['result_accuracy']:.1%}",
-            f"- 总进球准确率：{summary['goal_accuracy']:.1%}",
+            f"- 总进球区间准确率：{summary['goal_range_accuracy']:.1%}",
             "",
             "## 改进方案（仅建议，不自动修改模型）",
             "",

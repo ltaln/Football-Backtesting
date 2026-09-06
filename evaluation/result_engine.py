@@ -22,8 +22,9 @@ def confidence_bucket(confidence: float) -> str:
 
 def evaluate_result(prediction: dict, actual: dict) -> dict:
     predicted = prediction.get("result")
-    accepted = predicted if isinstance(predicted, list) else [predicted]
+    accepted = predicted if isinstance(predicted, list) else ([predicted] if predicted else [])
     return {
-        "hit": actual.get("final_result") in accepted,
-        "confidence_bucket": confidence_bucket(prediction.get("confidence", 0)),
+        "evaluable": bool(accepted),
+        "hit": bool(accepted) and actual.get("final_result") in accepted,
+        "confidence_bucket": confidence_bucket(prediction.get("confidence", 0)) if accepted else "NOT_EVALUABLE",
     }

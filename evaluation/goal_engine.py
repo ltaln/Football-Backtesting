@@ -3,4 +3,10 @@ def evaluate_goals(prediction: dict, actual: dict) -> dict[str, bool]:
     expected = prediction.get("exact")
     goal_range = prediction.get("range", [])
     in_range = isinstance(goal_range, list) and len(goal_range) == 2 and int(goal_range[0]) <= total <= int(goal_range[1])
-    return {"exact": expected is not None and int(expected) == total, "range": in_range}
+    return {
+        "evaluable": expected is not None or (isinstance(goal_range, list) and len(goal_range) == 2),
+        "exact_evaluable": expected is not None,
+        "range_evaluable": isinstance(goal_range, list) and len(goal_range) == 2,
+        "exact": expected is not None and int(expected) == total,
+        "range": in_range,
+    }

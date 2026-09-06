@@ -9,9 +9,9 @@ def _direction(score: tuple[int, int]) -> str:
 
 def evaluate_score(score_top2: list[str], final_score: str) -> dict[str, bool]:
     if not score_top2:
-        return {"exact_hit": False, "near_hit": False, "direction_hit": False}
+        return {"evaluable": False, "exact_hit": False, "near_hit": False, "direction_hit": False}
     actual = _score(final_score)
     predicted = [_score(value) for value in score_top2[:2]]
     exact = actual in predicted
     near = not exact and min(abs(p[0] - actual[0]) + abs(p[1] - actual[1]) for p in predicted) == 1
-    return {"exact_hit": exact, "near_hit": near, "direction_hit": _direction(predicted[0]) == _direction(actual)}
+    return {"evaluable": True, "exact_hit": exact, "near_hit": near, "direction_hit": _direction(predicted[0]) == _direction(actual)}
