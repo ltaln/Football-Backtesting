@@ -1,0 +1,25 @@
+{
+  "example_only": true,
+  "matches": [
+    {
+      "match_id": "EXAMPLE-20260801-001",
+      "match_date": "2026-08-01",
+      "match": "示例主队 vs 示例客队",
+      "prediction_input": {
+        "prematch_odds": {"H": 2.05, "D": 3.2, "A": 3.6},
+        "handicap": "主队 -0.25",
+        "team_form": "赛前样例",
+        "injuries_before_match": [],
+        "final_score": "1-0",
+        "post_match_news": "该字段会被删除"
+      },
+      "prediction": {
+        "score_top2": ["1-0", "1-1"],
+        "htft": {"half_result": "D", "full_result": "H"},
+        "result": {"result": "H", "confidence": 0.68},
+        "goal": {"exact": 1, "range": [1, 2]}
+      },
+      "actual": {"final_score": "1-0", "half_result": "D", "final_result": "H", "total_goals": 1}
+    }
+  ]
+}

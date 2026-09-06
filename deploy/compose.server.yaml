@@ -1,0 +1,40 @@
+services:
+  hh520-insight-ai:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: hh520-insight
+    restart: unless-stopped
+    environment:
+      HH520_API_TOKEN: ${HH520_API_TOKEN:?Set HH520_API_TOKEN}
+      HH520_PUBLIC_URL: https://insight.156.225.23.17.sslip.io
+      HH520_DATABASE: /state/hh520_backtest.db
+      HH520_SNAPSHOT_DIR: /state/snapshots
+      HH520_REPORT_DIR: /state/reports
+      HH520_LOG_PATH: /state/logs/hh520.log
+      HH520_PREDICTION_ARCHIVE_DIR: /prediction-state/predictions
+      HH520_REPLAY_PREDICTION_DIR: /prediction-state/replay_predictions
+      HH520_PREDICTION_INTERNAL_URL: http://gateway:8765
+      HH520_PREDICTION_TOKEN: ${HH520_PREDICTION_TOKEN:?Set the private prediction gateway token}
+    ports:
+      - "127.0.0.1:8775:8000"
+    volumes:
+      - insight_state:/state
+      - hh520_state:/prediction-state:ro
+    networks:
+      - firecrawl_backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  insight_state:
+  hh520_state:
+    external: true
+    name: hh520_hh520_state
+
+networks:
+  firecrawl_backend:
+    external: true

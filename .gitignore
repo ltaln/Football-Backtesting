@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite3
+logs/*.log
+data/snapshots/*.json
+data/reports/*.json
+.venv/
