@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from analysis.improvement_advisor import ImprovementAdvisor
+from core.prompt_loader import load_insight_prompt, prompt_binding
 
 
 class ReportEngine:
@@ -22,6 +23,7 @@ class ReportEngine:
         return round(sum(bool(item["evaluation"][section][field]) for item in eligible) / len(eligible), 4) if eligible else 0.0
 
     def build(self, task: dict, snapshot: dict, records: list[dict]) -> dict:
+        insight_binding = prompt_binding(load_insight_prompt())
         confidence: dict[str, dict[str, int | float]] = defaultdict(lambda: {"matches": 0, "hits": 0})
         for item in self._eligible(records, "result"):
             bucket = item["evaluation"]["result"]["confidence_bucket"]
@@ -61,6 +63,7 @@ class ReportEngine:
             "date_range": snapshot["date_range"],
             "pollution_status": snapshot["pollution_status"],
             "generated_time": datetime.now(timezone.utc).isoformat(),
+            "insight_prompt_binding": insight_binding,
             "summary": summary,
             "improvement_plan": improvement_plan,
             "matches": records,
@@ -77,6 +80,7 @@ class ReportEngine:
             "",
             f"- 任务：{report['task_id']}",
             f"- 日期：{report['date_range']}",
+            f"- 执行提示词：{report['insight_prompt_binding']['prompt_id']}（{report['insight_prompt_binding']['sha256']}）",
             f"- 匹配到赛果记录：{summary['total_matches']}",
             f"- 至少一项可评价：{summary['valid_matches']}（完全不可评价：{summary['not_evaluable_matches']}；源结果缺失：{summary['source_excluded_matches']}）",
             f"- 比分准确率：{summary['score_accuracy']:.1%}",

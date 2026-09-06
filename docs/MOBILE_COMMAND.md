@@ -33,6 +33,8 @@ https://你的域名/openapi.json
 
 认证方式选择 Bearer，值为部署时的 `HH520_API_TOKEN`。私人 GPT 对每个日期调用 `createReplayTask`，等待采集完成后读取脱敏页、按冻结模型提交预测，最后把本次 Commit 交给 `evaluateReplayBacktest`。日期范围最多 7 天，并按日期顺序一日一个 Commit。
 
+`createReplayTask` 和首个分析页会返回 `prediction_prompt_bundle`；历史重放预测必须先应用其中的 `execution_prompt`。最终 `evaluateReplayBacktest`/`getBacktestReport` 响应会返回 `prompt_bundle`；手机 GPT 必须使用其中的 HH520 Insight AI 提示词解释评价结果并生成最终中文答复。每个阶段都核对提示词 ID 与 SHA-256；提示词缺失或绑定变化时停止执行，不得静默回退。
+
 ## 运行边界
 
 手机端只是命令入口。回测服务复用冻结的 HH520 V2.1-Test 方法，但不自动修改参数、权重、Prompt 或模型配置。

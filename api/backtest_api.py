@@ -9,6 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
 
 from core.command_parser import CommandError
+from core.prompt_loader import load_insight_prompt, prompt_binding
 from core.task_manager import TaskManager
 
 public_url = os.getenv("HH520_PUBLIC_URL", "").strip().rstrip("/")
@@ -20,6 +21,7 @@ app = FastAPI(
 )
 security = HTTPBearer(auto_error=False)
 _manager: TaskManager | None = None
+_insight_prompt = load_insight_prompt()
 
 
 def get_manager() -> TaskManager:
@@ -55,6 +57,8 @@ class ReplayCreateResponse(BaseModel):
     must_continue: bool
     next_operation: str
     instruction: str
+    prediction_prompt_bundle: dict | None = None
+    insight_prompt_binding: dict
 
 
 class ReplayStatusResponse(BaseModel):
@@ -66,6 +70,8 @@ class ReplayStatusResponse(BaseModel):
     must_continue: bool
     next_operation: str
     instruction: str
+    prediction_prompt_bundle: dict | None = None
+    insight_prompt_binding: dict | None = None
 
 
 class ReplayAnalysisPageResponse(BaseModel):
@@ -81,6 +87,10 @@ class ReplayAnalysisPageResponse(BaseModel):
     matches: list[dict]
     required_module_order: list[str]
     date_rule: str | None = None
+    prediction_prompt_bundle: dict | None = None
+    prompt_binding: dict | None = None
+    insight_prompt_binding: dict | None = None
+    runtime_instruction: str | None = None
 
 
 class ReplayPredictionItem(BaseModel):
@@ -125,6 +135,7 @@ class HealthResponse(BaseModel):
     status: str
     service: str
     version: str
+    prompt_binding: dict
 
 
 class TaskStatusResponse(BaseModel):
@@ -148,11 +159,22 @@ class ReportResponse(BaseModel):
     improvement_plan: dict
     matches: list[dict]
     report_markdown: str
+    prompt_bundle: dict
+    runtime_instruction: str
 
 
 @app.get("/health", operation_id="healthCheck", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.3 Fresh Run"}
+    return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.3 Fresh Run",
+            "prompt_binding": prompt_binding(_insight_prompt)}
+
+
+def _prompted_report(report: dict) -> dict:
+    return {**report, "prompt_bundle": _insight_prompt,
+            "runtime_instruction": (
+                "Apply prompt_bundle.content to interpret this server-generated report and produce the final Chinese response. "
+                "Keep all metrics unchanged and treat recommendations as non-automatic candidates only."
+            )}
 
 
 @app.post(
@@ -164,7 +186,7 @@ def health() -> HealthResponse:
 )
 def run_backtest(request: RunRequest, _: None = Security(require_token)) -> dict:
     try:
-        return get_manager().run(request.command, request.prediction_commit_ids)
+        return _prompted_report(get_manager().run(request.command, request.prediction_commit_ids))
     except CommandError as exc:
         raise HTTPException(status_code=422, detail=exc.code) from exc
     except ValueError as exc:
@@ -210,17 +232,32 @@ def _prediction_request(method: str, path: str, body: dict | None = None) -> dic
 def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_token)) -> dict:
     if not request.command.strip().startswith("回测 "):
         raise HTTPException(status_code=422, detail="REPLAY_COMMAND_REQUIRED")
-    return _prediction_request("POST", "/v1/tasks", request.model_dump())
+    response = _prediction_request("POST", "/v1/tasks", request.model_dump())
+    response["prediction_prompt_bundle"] = response.pop("prompt_bundle", None)
+    response["insight_prompt_binding"] = prompt_binding(_insight_prompt)
+    response["instruction"] = (
+        "Apply prediction_prompt_bundle.execution_prompt during the replay prediction, continue with next_operation, "
+        "then apply the bound Insight prompt returned with the final evaluation report. Do not reply before completion."
+    )
+    return response
 
 
 @app.get("/replay/tasks/{task_id}", operation_id="getReplayTask", summary="轮询重放采集状态", response_model=ReplayStatusResponse)
 def get_replay_task(task_id: str, _: None = Security(require_token)) -> dict:
-    return _prediction_request("GET", f"/v1/tasks/{task_id}")
+    response = _prediction_request("GET", f"/v1/tasks/{task_id}")
+    if "prompt_bundle" in response:
+        response["prediction_prompt_bundle"] = response.pop("prompt_bundle")
+    response["insight_prompt_binding"] = prompt_binding(_insight_prompt)
+    return response
 
 
 @app.get("/replay/tasks/{task_id}/analysis-page", operation_id="getReplayAnalysisPage", summary="读取最多两场已脱敏赛前证据；源网站日期目录为日期最高优先级", response_model=ReplayAnalysisPageResponse)
 def get_replay_analysis_page(task_id: str, cursor: int = 0, _: None = Security(require_token)) -> dict:
-    return _prediction_request("GET", f"/v1/tasks/{task_id}/analysis-page?cursor={cursor}")
+    response = _prediction_request("GET", f"/v1/tasks/{task_id}/analysis-page?cursor={cursor}")
+    if "prompt_bundle" in response and response["prompt_bundle"] is not None:
+        response["prediction_prompt_bundle"] = response.pop("prompt_bundle")
+    response["insight_prompt_binding"] = prompt_binding(_insight_prompt)
+    return response
 
 
 @app.post("/replay/tasks/{task_id}/analysis-min", operation_id="saveReplayPredictionBatch", summary="不可变保存一至三场重放预测", response_model=ReplayPredictionResponse, openapi_extra={"x-openai-isConsequential": False})
@@ -251,4 +288,4 @@ def get_report(task_id: str, _: None = Security(require_token)) -> dict:
     report = get_manager().report(task_id)
     if report is None:
         raise HTTPException(status_code=404, detail="REPORT_NOT_FOUND")
-    return report
+    return _prompted_report(report)

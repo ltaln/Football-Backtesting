@@ -1,0 +1,12 @@
+{
+  "prompt_id": "HH520-INSIGHT-AI-V1.0",
+  "path": "prompts/HH520-INSIGHT-AI-V1.0.txt",
+  "sha256": "ca6b46600ab21a5809adcd15e69f150a32db87ee8feb619fba3d1512140547d9",
+  "delivery": "chatgpt_action_response",
+  "applies_to": [
+    "backtest_evaluation_interpretation",
+    "error_analysis",
+    "improvement_recommendations",
+    "mobile_final_response"
+  ]
+}

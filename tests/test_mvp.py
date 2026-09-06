@@ -8,6 +8,7 @@ from collector.collector_adapter import CollectorAdapter
 from collector.football_ai_adapter import _htft, _result
 from core.command_parser import CommandError, parse_command
 from core.config import Settings
+from core.prompt_loader import load_insight_prompt, prompt_binding
 from core.task_manager import TaskManager
 from snapshot.time_pollution_filter import sanitize_prediction_input
 
@@ -103,6 +104,14 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(report["summary"]["valid_matches"], 1)
         self.assertEqual(report["summary"]["metric_samples"]["result"], 1)
         self.assertEqual(report["summary"]["result_accuracy"], 1.0)
+
+    def test_8_insight_prompt_is_loaded_and_bound_to_report(self):
+        bundle = load_insight_prompt()
+        self.assertEqual(bundle["prompt_id"], "HH520-INSIGHT-AI-V1.0")
+        self.assertIn("你现在运行的是 HH520 Insight AI 回测系统。", bundle["content"])
+        self.assertEqual(len(bundle["sha256"]), 64)
+        report = self.run_command("回测 2026-08-01 全部比赛")
+        self.assertEqual(report["insight_prompt_binding"], prompt_binding(bundle))
 
 
 if __name__ == "__main__":
