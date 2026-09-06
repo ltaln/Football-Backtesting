@@ -15,7 +15,7 @@ public_url = os.getenv("HH520_PUBLIC_URL", "").strip().rstrip("/")
 app = FastAPI(
     title="HH520 Insight AI",
     description="重新采集历史数据、屏蔽目标赛果与赛后信息、按 HH520 V2.1-Test 重新预测，再生成回测与改进建议；不会自动修改预测模型。",
-    version="Backtest V1.2 Evaluation Fix",
+    version="Backtest V1.3 Fresh Run",
     servers=[{"url": public_url}] if public_url else None,
 )
 security = HTTPBearer(auto_error=False)
@@ -152,7 +152,7 @@ class ReportResponse(BaseModel):
 
 @app.get("/health", operation_id="healthCheck", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.2 Evaluation Fix"}
+    return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.3 Fresh Run"}
 
 
 @app.post(

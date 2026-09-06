@@ -81,17 +81,17 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(_result("胜平负：PASS（资料不足）", match), [])
         self.assertEqual(len(_htft("半全场 Top3：胜/胜 / 平/胜 / 平/平")), 3)
 
-    def test_6_failed_previous_range_blocks_next_but_allows_retry(self):
+    def test_6_every_command_starts_a_fresh_task(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         settings = Settings(database_path=root / "db.sqlite3", snapshot_dir=root / "snapshots", archive_dir=root / "archive", report_dir=root / "reports", log_path=root / "test.log")
         with self.assertRaisesRegex(ValueError, "NO_MATCHES_IN_DATE_RANGE"):
             TaskManager(settings, EmptyCollector()).run("回测 2026-08-01 全部比赛")
-        with self.assertRaisesRegex(ValueError, "PREVIOUS_BACKTEST_ERROR_UNRESOLVED"):
-            TaskManager(settings, StaticCollector()).run("回测 2026-08-02 全部比赛")
-        report = TaskManager(settings, StaticCollector()).run("回测 2026-08-01 全部比赛")
-        self.assertEqual(report["status"], "REPORT_READY")
+        first = TaskManager(settings, StaticCollector()).run("回测 2026-08-02 全部比赛")
+        second = TaskManager(settings, StaticCollector()).run("回测 2026-08-02 全部比赛")
+        self.assertEqual(first["status"], "REPORT_READY")
+        self.assertNotEqual(first["task_id"], second["task_id"])
 
     def test_7_not_evaluable_predictions_do_not_enter_metric_denominators(self):
         temporary = tempfile.TemporaryDirectory()
