@@ -3,6 +3,7 @@ import unittest
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from collector.collector_adapter import CollectorAdapter
 from collector.football_ai_adapter import _htft, _result
@@ -112,6 +113,88 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(len(bundle["sha256"]), 64)
         report = self.run_command("回测 2026-08-01 全部比赛")
         self.assertEqual(report["insight_prompt_binding"], prompt_binding(bundle))
+
+    def test_9_replay_range_creates_one_fresh_task_per_day(self):
+        from api.backtest_api import ReplayTaskRequest, create_replay_task
+
+        calls = []
+
+        def fake_prediction_request(method, path, body=None):
+            calls.append((method, path, body))
+            replay_date = body["command"].split()[1]
+            return {
+                "task_id": f"task-{replay_date}",
+                "status_url": f"/v1/tasks/task-{replay_date}",
+                "report_url": f"/v1/tasks/task-{replay_date}/report",
+                "created": True,
+                "must_continue": True,
+                "next_operation": "getTaskStatus",
+                "instruction": "continue",
+                "prompt_bundle": {"prompt_id": "HH520-PROMPT-V2.1"},
+            }
+
+        with patch("api.backtest_api._prediction_request", side_effect=fake_prediction_request):
+            response = create_replay_task(ReplayTaskRequest(
+                request_id="mobile-range-unique",
+                command="回测 2026-07-16 至 2026-07-21",
+            ))
+
+        self.assertEqual(response["execution_status"], "CREATED")
+        self.assertEqual(response["day_count"], 6)
+        self.assertEqual(response["created_count"], 6)
+        self.assertEqual(response["failed_count"], 0)
+        self.assertEqual([item[2]["command"] for item in calls], [
+            "回测 2026-07-16 全部比赛",
+            "回测 2026-07-17 全部比赛",
+            "回测 2026-07-18 全部比赛",
+            "回测 2026-07-19 全部比赛",
+            "回测 2026-07-20 全部比赛",
+            "回测 2026-07-21 全部比赛",
+        ])
+        child_request_ids = [item[2]["request_id"] for item in calls]
+        self.assertEqual(len(set(child_request_ids)), 6)
+        self.assertTrue(all(value != "mobile-range-unique" for value in child_request_ids))
+        self.assertEqual([task["task_id"] for task in response["tasks"]], [
+            "task-2026-07-16", "task-2026-07-17", "task-2026-07-18",
+            "task-2026-07-19", "task-2026-07-20", "task-2026-07-21",
+        ])
+
+    def test_10_replay_range_returns_real_partial_failure_context(self):
+        from fastapi import HTTPException
+        from api.backtest_api import ReplayTaskRequest, create_replay_task
+
+        def fake_prediction_request(method, path, body=None):
+            if "2026-07-18" in body["command"]:
+                raise HTTPException(status_code=503, detail="RESULT_MASK_FAILED")
+            replay_date = body["command"].split()[1]
+            return {
+                "task_id": f"task-{replay_date}",
+                "status_url": f"/v1/tasks/task-{replay_date}",
+                "report_url": f"/v1/tasks/task-{replay_date}/report",
+                "created": True,
+                "must_continue": True,
+                "next_operation": "getTaskStatus",
+                "instruction": "continue",
+            }
+
+        with patch("api.backtest_api._prediction_request", side_effect=fake_prediction_request):
+            response = create_replay_task(ReplayTaskRequest(
+                request_id="mobile-range-partial",
+                command="回测 2026-07-16 至 2026-07-19",
+            ))
+
+        self.assertEqual(response["execution_status"], "PARTIAL")
+        self.assertEqual(response["created_count"], 3)
+        self.assertEqual(response["failed_count"], 1)
+        self.assertFalse(response["must_continue"])
+        self.assertIsNone(response["next_operation"])
+        self.assertEqual(response["errors"], [{
+            "date": "2026-07-18",
+            "request_id": response["errors"][0]["request_id"],
+            "command": "回测 2026-07-18 全部比赛",
+            "http_status": 503,
+            "error": "RESULT_MASK_FAILED",
+        }])
 
 
 if __name__ == "__main__":

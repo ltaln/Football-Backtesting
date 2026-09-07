@@ -31,7 +31,9 @@
 https://你的域名/openapi.json
 ```
 
-认证方式选择 Bearer，值为部署时的 `HH520_API_TOKEN`。私人 GPT 对每个日期调用 `createReplayTask`，等待采集完成后读取脱敏页、按冻结模型提交预测，最后把本次 Commit 交给 `evaluateReplayBacktest`。日期范围最多 7 天，并按日期顺序一日一个 Commit。
+认证方式选择 Bearer，值为部署时的 `HH520_API_TOKEN`。私人 GPT 收到命令后的第一步必须实际调用 `createReplayTask`，不得先回复用户。该动作支持单日或最多 7 天的日期范围；范围拆分由服务器完成，并为每个自然日生成独立 `request_id` 和全新的 Replay Task。返回后，私人 GPT 按日期顺序等待每个任务采集完成、读取脱敏页、按冻结模型提交预测，最后把本次所有新 Commit 交给 `evaluateReplayBacktest`。
+
+如果 `createReplayTask` 返回 `PARTIAL` 或 `FAILED`，私人 GPT 必须逐项报告 `errors` 中的日期、HTTP 状态和真实错误码；如果没有收到动作响应，则只能报告 `EXECUTION_NOT_STARTED`，不得伪造 `task_id`、`commit_id` 或预测结果。不得复用上一轮的任务或 Prediction Commit。
 
 `createReplayTask` 和首个分析页会返回 `prediction_prompt_bundle`；历史重放预测必须先应用其中的 `execution_prompt`。最终 `evaluateReplayBacktest`/`getBacktestReport` 响应会返回 `prompt_bundle`；手机 GPT 必须使用其中的 HH520 Insight AI 提示词解释评价结果并生成最终中文答复。每个阶段都核对提示词 ID 与 SHA-256；提示词缺失或绑定变化时停止执行，不得静默回退。
 
