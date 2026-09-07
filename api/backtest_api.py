@@ -1,6 +1,8 @@
 import os
 import json
 import secrets
+from datetime import timedelta
+from hashlib import sha256
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -8,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
 
-from core.command_parser import CommandError
+from core.command_parser import CommandError, parse_command
 from core.prompt_loader import load_insight_prompt, prompt_binding
 from core.task_manager import TaskManager
 
@@ -49,7 +51,11 @@ class ReplayTaskRequest(BaseModel):
     command: str
 
 
-class ReplayCreateResponse(BaseModel):
+class ReplayCreatedTask(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    date: str
+    request_id: str
+    command: str
     task_id: str
     status_url: str
     report_url: str
@@ -59,6 +65,36 @@ class ReplayCreateResponse(BaseModel):
     instruction: str
     prediction_prompt_bundle: dict | None = None
     insight_prompt_binding: dict
+
+
+class ReplayCreationError(BaseModel):
+    date: str
+    request_id: str
+    command: str
+    http_status: int
+    error: str
+
+
+class ReplayCreateResponse(BaseModel):
+    task_id: str | None = None
+    status_url: str | None = None
+    report_url: str | None = None
+    created: bool = False
+    must_continue: bool
+    next_operation: str | None = None
+    instruction: str
+    prediction_prompt_bundle: dict | None = None
+    insight_prompt_binding: dict
+    execution_status: str | None = None
+    range_run_id: str | None = None
+    parent_request_id: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    day_count: int | None = None
+    created_count: int | None = None
+    failed_count: int | None = None
+    tasks: list[ReplayCreatedTask] | None = None
+    errors: list[ReplayCreationError] | None = None
 
 
 class ReplayStatusResponse(BaseModel):
@@ -220,7 +256,8 @@ def _prediction_request(method: str, path: str, body: dict | None = None) -> dic
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         try:
-            detail = json.loads(exc.read().decode("utf-8")).get("error", "REPLAY_GATEWAY_ERROR")
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = payload.get("error") or payload.get("detail") or "REPLAY_GATEWAY_ERROR"
         except Exception:
             detail = "REPLAY_GATEWAY_ERROR"
         raise HTTPException(status_code=exc.code, detail=detail) from exc
@@ -228,11 +265,7 @@ def _prediction_request(method: str, path: str, body: dict | None = None) -> dic
         raise HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE") from exc
 
 
-@app.post("/replay/tasks", operation_id="createReplayTask", summary="启动单日历史重放：重新采集并等待 GPT 预测", response_model=ReplayCreateResponse, openapi_extra={"x-openai-isConsequential": False})
-def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_token)) -> dict:
-    if not request.command.strip().startswith("回测 "):
-        raise HTTPException(status_code=422, detail="REPLAY_COMMAND_REQUIRED")
-    response = _prediction_request("POST", "/v1/tasks", request.model_dump())
+def _decorate_replay_create(response: dict) -> dict:
     response["prediction_prompt_bundle"] = response.pop("prompt_bundle", None)
     response["insight_prompt_binding"] = prompt_binding(_insight_prompt)
     response["instruction"] = (
@@ -240,6 +273,82 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         "then apply the bound Insight prompt returned with the final evaluation report. Do not reply before completion."
     )
     return response
+
+
+def _child_request_id(parent_request_id: str, replay_date: str) -> str:
+    digest = sha256(f"{parent_request_id}:{replay_date}".encode("utf-8")).hexdigest()[:32]
+    return f"replay-{digest}"
+
+
+@app.post(
+    "/replay/tasks",
+    operation_id="createReplayTask",
+    summary="启动一至七天历史重放；范围命令在服务器端拆成逐日全新任务",
+    response_model=ReplayCreateResponse,
+    response_model_exclude_none=True,
+    openapi_extra={"x-openai-isConsequential": False},
+)
+def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_token)) -> dict:
+    try:
+        command = parse_command(request.command)
+    except CommandError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from exc
+
+    day_count = (command.end_date - command.start_date).days + 1
+    if day_count == 1:
+        return _decorate_replay_create(_prediction_request("POST", "/v1/tasks", request.model_dump()))
+
+    tasks: list[dict] = []
+    errors: list[dict] = []
+    for offset in range(day_count):
+        replay_date = (command.start_date + timedelta(days=offset)).isoformat()
+        child_request_id = _child_request_id(request.request_id, replay_date)
+        child_command = f"回测 {replay_date} 全部比赛"
+        try:
+            child = _decorate_replay_create(_prediction_request("POST", "/v1/tasks", {
+                "request_id": child_request_id,
+                "command": child_command,
+            }))
+            tasks.append({
+                "date": replay_date,
+                "request_id": child_request_id,
+                "command": child_command,
+                **child,
+            })
+        except HTTPException as exc:
+            errors.append({
+                "date": replay_date,
+                "request_id": child_request_id,
+                "command": child_command,
+                "http_status": exc.status_code,
+                "error": str(exc.detail),
+            })
+
+    created_count = len(tasks)
+    failed_count = len(errors)
+    execution_status = "CREATED" if failed_count == 0 else ("PARTIAL" if created_count else "FAILED")
+    return {
+        "created": created_count == day_count,
+        "must_continue": created_count == day_count,
+        "next_operation": "getReplayTask" if created_count == day_count else None,
+        "instruction": (
+            "If errors is non-empty, stop and report each exact date, HTTP status, and error code. Otherwise process "
+            "every returned task in ascending date order through getReplayTask, getReplayAnalysisPage, "
+            "saveReplayPredictionBatch, and finalizeReplayPrediction. Then call evaluateReplayBacktest once with "
+            "the original range command and all new prediction commit IDs in date order. Never reuse an older task or commit."
+        ),
+        "insight_prompt_binding": prompt_binding(_insight_prompt),
+        "execution_status": execution_status,
+        "range_run_id": f"range-{sha256(f'{request.request_id}:{request.command}'.encode('utf-8')).hexdigest()[:20]}",
+        "parent_request_id": request.request_id,
+        "start_date": command.start_date.isoformat(),
+        "end_date": command.end_date.isoformat(),
+        "day_count": day_count,
+        "created_count": created_count,
+        "failed_count": failed_count,
+        "tasks": tasks,
+        "errors": errors,
+    }
 
 
 @app.get("/replay/tasks/{task_id}", operation_id="getReplayTask", summary="轮询重放采集状态", response_model=ReplayStatusResponse)
