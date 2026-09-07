@@ -54,11 +54,22 @@ class TaskManager:
             for match in snapshot.matches:
                 evaluation = self.evaluator.evaluate(match)
                 error_type = self.analyzer.classify(match, evaluation)
-                result = {"match": match.get("match", match.get("match_id")), "prediction": match.get("prediction", {}), "actual_result": match.get("actual", {}), "evaluation": evaluation, "error_type": error_type}
+                result = {
+                    "match": match.get("match", match.get("match_id")),
+                    "match_id": match.get("match_id"),
+                    "prediction": match.get("prediction", {}),
+                    "actual_result": match.get("actual", {}),
+                    "evaluation": evaluation,
+                    "error_type": error_type,
+                    "modules": match.get("modules", []),
+                    "source_warnings": match.get("source_warnings", []),
+                    "prediction_input": match.get("prediction_input", {}),
+                }
                 evaluations.append(result)
                 self.db.save_evaluation(task.task_id, EvaluationRecord(match.get("match_id", "UNKNOWN"), json.dumps(match.get("prediction", {}), ensure_ascii=False), json.dumps(match.get("actual", {}), ensure_ascii=False), json.dumps(evaluation, ensure_ascii=False), error_type))
             self._status(task.task_id, "REPORT_READY", snapshot.snapshot_id)
             stored_task = self.db.get_task(task.task_id)
+            stored_task["prediction_commit_ids"] = list(prediction_commit_ids or [])
             report = self.reports.build(stored_task, snapshot_data, evaluations)
             self.log.info("task=%s status=REPORT_READY matches=%d", task.task_id, len(evaluations))
             return report

@@ -204,7 +204,7 @@ class FootballAIArchiveCollector(CollectorAdapter):
                 warnings = [str(value) for value in item.get("warnings", [])]
                 degraded_modules = [module.get("module_id") for module in item.get("modules", []) if module.get("status") == "DEGRADED"]
                 warning_text = " ".join(warnings)
-                data_error = bool(degraded_modules) or any(word in warning_text for word in ("日期", "身份", "错配", "不一致", "数据", "阵容"))
+                data_error = any(word in warning_text for word in ("日期错误", "身份错误", "错配", "时间污染", "口径不一致"))
                 market_error = any(word in warning_text for word in ("盘口", "水位", "赔率", "市场"))
                 prediction = {
                     "score_top2": scores,
@@ -225,7 +225,13 @@ class FootballAIArchiveCollector(CollectorAdapter):
                         "source_warnings": warnings,
                         "degraded_modules": degraded_modules,
                     },
-                    "error_signals": {"data_error": data_error, "market_error": market_error},
+                    "modules": item.get("modules", []),
+                    "source_warnings": warnings,
+                    "error_signals": {
+                        "data_error": data_error,
+                        "market_error": market_error,
+                        "information_insufficient": bool(degraded_modules),
+                    },
                     "prediction": prediction, "actual": actual["actual"],
                 })
             current += timedelta(days=1)

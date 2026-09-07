@@ -229,7 +229,7 @@ class MVPTests(unittest.TestCase):
         def fake_prediction_request(method, path, body=None):
             if path.endswith("/analysis-batch"):
                 day = "2026-08-01" if task_ids[0] in path else "2026-08-02"
-                return {"prompt_bundle": {"prompt_id": "frozen"}, "matches": [{
+                return {"prompt_bundle": {"prompt_id": "frozen", "execution_prompt": "FULL FROZEN PROMPT"}, "matches": [{
                     "date": day, "match_no": 1, "code": day[-2:] + "001",
                     "kickoff_at_raw": day + " 20:00", "identity_check": {"home": "H", "away": "A"},
                     "package_sha256": "f" * 64, "result_mask": {"applied": True},
@@ -247,6 +247,8 @@ class MVPTests(unittest.TestCase):
         self.assertTrue(response["ready"])
         self.assertEqual([item["k"] for item in response["matches"]], [1, 2])
         self.assertEqual(response["next_operation"], "completeReplayRange")
+        self.assertEqual(response["prediction_prompt_bundle"]["execution_prompt"], "FULL FROZEN PROMPT")
+        self.assertNotIn("CCCCCCCCCCCCC", response["output_format"])
         key, values, modules = backtest_api._decode_ultra(
             "1|1:0,1:1,2:0|HH,DH,DD|H-0.5|U2.5|H|2-3|62|CCCCCCCCCCCCC"
         )
@@ -255,6 +257,34 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(modules, "C" * 13)
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
+
+    def test_14_missing_score_evidence_forces_correct_score_degradation(self):
+        from api.backtest_api import _evidence_audit
+
+        mask, refs = _evidence_audit({
+            "identity_check": {"result": "PASS"}, "result_mask": {"applied": True},
+            "sections": [
+                {"category": "mixed_data", "source_url": "mixed", "content": "Home VS Away"},
+                {"category": "asian_handicap_changes", "source_url": "asian", "content": "初盘主 2.0 初盘平 3.0 初盘客 4.0"},
+                {"category": "score_odds_changes", "source_url": "score", "content": "模块降级"},
+            ],
+        })
+        self.assertEqual(len(mask), 13)
+        self.assertEqual(mask[6], "D")
+        self.assertEqual(refs["correct_score"], ["score"])
+
+    def test_15_unknown_error_is_not_called_random_event(self):
+        from analysis.error_analyzer import ErrorAnalyzer
+
+        evaluation = {key: {"evaluable": True} for key in ("score", "htft", "result", "goal")}
+        evaluation["score"]["exact_hit"] = False
+        evaluation["htft"]["overall_hit"] = True
+        evaluation["result"].update(hit=False)
+        evaluation["goal"]["range"] = True
+        match = {"prediction": {"result": {"confidence": 0.5}}, "error_signals": {}}
+        self.assertEqual(ErrorAnalyzer().classify(match, evaluation), "B_MODEL_JUDGMENT_ERROR")
+        match["error_signals"] = {"information_insufficient": True}
+        self.assertEqual(ErrorAnalyzer().classify(match, evaluation), "E_INFORMATION_INSUFFICIENT")
 
 
 if __name__ == "__main__":

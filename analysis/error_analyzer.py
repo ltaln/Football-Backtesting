@@ -1,4 +1,7 @@
-ERROR_TYPES = {"NOT_EVALUABLE", "DATA_ERROR", "MARKET_ERROR", "TEAM_STATE_ERROR", "GAME_FLOW_ERROR", "RANDOM_EVENT"}
+ERROR_TYPES = {
+    "NOT_EVALUABLE", "A_DATA_ERROR", "B_MODEL_JUDGMENT_ERROR", "C_CALIBRATION_ERROR",
+    "D_ABNORMAL_MATCH", "E_INFORMATION_INSUFFICIENT",
+}
 
 
 class ErrorAnalyzer:
@@ -16,11 +19,12 @@ class ErrorAnalyzer:
             return None
         signals = match.get("error_signals", {})
         if signals.get("data_error"):
-            return "DATA_ERROR"
-        if signals.get("market_error"):
-            return "MARKET_ERROR"
-        if signals.get("team_state_error"):
-            return "TEAM_STATE_ERROR"
-        if signals.get("game_flow_error"):
-            return "GAME_FLOW_ERROR"
-        return "RANDOM_EVENT"
+            return "A_DATA_ERROR"
+        if signals.get("abnormal_match") or signals.get("game_flow_error"):
+            return "D_ABNORMAL_MATCH"
+        if signals.get("information_insufficient"):
+            return "E_INFORMATION_INSUFFICIENT"
+        confidence = match.get("prediction", {}).get("result", {}).get("confidence")
+        if isinstance(confidence, (int, float)) and confidence >= 0.65 and not evaluation["result"].get("hit", True):
+            return "C_CALIBRATION_ERROR"
+        return "B_MODEL_JUDGMENT_ERROR"

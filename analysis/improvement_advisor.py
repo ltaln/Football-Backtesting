@@ -17,8 +17,8 @@ class ImprovementAdvisor:
         if samples.get("goal_range", total) and summary["goal_accuracy"] < 0.5:
             proposals.append({"priority": "MEDIUM", "area": "GOAL", "finding": "总进球区间命中率低于 50%", "proposal": "按区间复核大小球边界，不因缺少精确值扩大模型改动。"})
         errors = Counter(item["error_type"] for item in records if item.get("error_type"))
-        if errors.get("DATA_ERROR") or errors.get("NOT_EVALUABLE"):
-            count = errors.get("DATA_ERROR", 0) + errors.get("NOT_EVALUABLE", 0)
+        if errors.get("A_DATA_ERROR") or errors.get("E_INFORMATION_INSUFFICIENT") or errors.get("NOT_EVALUABLE"):
+            count = errors.get("A_DATA_ERROR", 0) + errors.get("E_INFORMATION_INSUFFICIENT", 0) + errors.get("NOT_EVALUABLE", 0)
             proposals.insert(0, {"priority": "HIGH", "area": "DATA", "finding": f"发现 {count} 场数据错误或不可评价记录", "proposal": "先修复数据来源、身份或时间污染，再评价模型表现。"})
         weak_high_confidence = [bucket for bucket, values in summary["confidence_performance"].items() if bucket in {"65-79", "80-100", "HIGH"} and values["matches"] and values["accuracy"] < 0.6]
         if weak_high_confidence:

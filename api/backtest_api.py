@@ -66,7 +66,8 @@ class ReplayRangeCompleteRequest(ReplayRangeRequest):
             "One ultra-compact prediction per returned k: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
             "Scores use 1:0; HTFT uses H/D/A pairs; asian H-0.5/A+0.5/P; ou O2.5/U2.5/P; "
-            "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D."
+            "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D. "
+            "A module may be C only when the match q mask is C; every q=D must remain D."
         ),
     )
 
@@ -256,8 +257,10 @@ def health() -> HealthResponse:
 def _prompted_report(report: dict) -> dict:
     return {**report, "prompt_bundle": _insight_prompt,
             "runtime_instruction": (
-                "Apply prompt_bundle.content to interpret this server-generated report and produce the final Chinese response. "
-                "Keep all metrics unchanged and treat recommendations as non-automatic candidates only."
+                "Apply the complete prompt_bundle.content, without shortening or skipping any required section, to interpret "
+                "this server-generated report. Produce a detailed Chinese final response with per-match comparison, all 13 "
+                "module audits, A-E root causes, calibration, limitations, and testable reversible recommendations. Keep all "
+                "metrics unchanged and treat recommendations as non-automatic candidates only."
             )}
 
 
@@ -479,16 +482,65 @@ def _compact_section(category: str, value: object) -> str:
     return ""
 
 
-def _compact_prompt_bundle(bundle: object) -> dict | None:
-    if not isinstance(bundle, dict):
-        return None
-    compact = {key: bundle[key] for key in ("prompt_id", "sha256", "model_version", "version") if key in bundle}
-    compact["execution_prompt"] = (
-        "Use only each match's masked pre-kickoff evidence. Apply all 13 required frozen modules independently; "
-        "degrade missing/conflicting modules, never invent data, and choose calibrated score, HT/FT, Asian, "
-        "over/under, 1X2 and total-goal predictions. Upgrade Package 1 remains PARKED."
-    )
-    return compact
+MODULE_IDS = [
+    "data_consistency_audit", "data_confidence_score", "water_market", "team_analysis",
+    "league_analysis", "company_source_analysis", "correct_score", "soccerstats_htft",
+    "odds_abnormal_detection", "match_risk_engine", "conflict_detection",
+    "cross_model_interaction", "calibration",
+]
+
+
+def _evidence_audit(item: dict) -> tuple[str, dict[str, list[str]]]:
+    """Return the strongest defensible module mask and module-scoped evidence refs."""
+    by_category: dict[str, list[str]] = {}
+    usable: set[str] = set()
+    for section in item.get("sections", []):
+        category = str(section.get("category") or "data")
+        compact = _compact_section(category, section.get("content", ""))
+        ref = section.get("source_url") or f"{category}:{str(section.get('source_sha256', ''))[:12]}"
+        by_category.setdefault(category, []).append(str(ref))
+        if compact and not compact.endswith(":D") and compact not in {"AH", "SC:"}:
+            usable.add(category)
+
+    def refs(*patterns: str) -> list[str]:
+        values = [ref for category, found in by_category.items()
+                  if any(pattern in category for pattern in patterns) for ref in found]
+        return list(dict.fromkeys(values))
+
+    def has_usable(*patterns: str) -> bool:
+        return any(any(pattern in category for pattern in patterns) for category in usable)
+
+    all_refs = list(dict.fromkeys(ref for values in by_category.values() for ref in values))
+    market_refs = refs("asian", "score", "odds", "market")
+    team_refs = refs("lineup", "team", "mixed_data")
+    league_refs = refs("league")
+    htft_refs = refs("soccerstats", "htft", "half")
+    model_refs = refs("model")
+    calibration_refs = refs("calibration", "probability")
+    masked = bool((item.get("result_mask") or {}).get("applied")) if isinstance(item.get("result_mask"), dict) else bool(item.get("result_mask"))
+    available = [
+        masked and bool(item.get("identity_check")) and bool(all_refs),
+        len(usable) >= 3,
+        has_usable("asian", "market"),
+        has_usable("lineup", "team"),
+        has_usable("league"),
+        has_usable("asian", "score", "odds", "market"),
+        has_usable("score"),
+        has_usable("soccerstats", "htft", "half"),
+        has_usable("asian", "score", "odds", "market"),
+        len(usable) >= 2,
+        len(usable) >= 2,
+        bool(model_refs),
+        bool(calibration_refs),
+    ]
+    module_refs = {
+        MODULE_IDS[0]: all_refs, MODULE_IDS[1]: all_refs, MODULE_IDS[2]: refs("asian", "market"),
+        MODULE_IDS[3]: team_refs, MODULE_IDS[4]: league_refs, MODULE_IDS[5]: market_refs,
+        MODULE_IDS[6]: refs("score"), MODULE_IDS[7]: htft_refs, MODULE_IDS[8]: market_refs,
+        MODULE_IDS[9]: all_refs, MODULE_IDS[10]: all_refs, MODULE_IDS[11]: model_refs,
+        MODULE_IDS[12]: calibration_refs,
+    }
+    return "".join("C" if value else "D" for value in available), module_refs
 
 
 def _range_batches(task_ids: list[str]) -> list[dict]:
@@ -548,6 +600,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
                 "t": item.get("kickoff_at_raw"),
                 "i": _excerpt(item.get("identity_check", {}), 100),
                 "e": evidence,
+                "q": _evidence_audit(item)[0],
                 "mask": bool(result_mask.get("applied")) if isinstance(result_mask, dict) else bool(result_mask),
             })
             key += 1
@@ -556,15 +609,21 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         "ready": True,
         "replay_mode": True,
         "task_ids": request.task_ids,
-        "prediction_prompt_bundle": _compact_prompt_bundle(prompt_bundle),
+        "prediction_prompt_bundle": prompt_bundle,
+        "required_module_order": MODULE_IDS,
         "matches": matches,
         "output_format": (
             "Return every k exactly once in p using: "
-            "k|1:0,1:1,2:0|HH,DH,DD|H-0.5|U2.5|H|2-3|62|CCCCCCCCCCCCC. "
-            "H/D/A mean home/draw/away; P means PASS. Analyze all 13 frozen modules before choosing values."
+            "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|module_codes. "
+            "H/D/A mean home/draw/away; P means PASS. q is the evidence ceiling: copy every q=D as D; "
+            "a q=C may still be D after analysis. Never copy a fixed all-C template."
         ),
         "next_operation": "completeReplayRange",
-        "instruction": "Analyze every returned match under the bound frozen prompt, then call completeReplayRange once. Do not reply first.",
+        "instruction": (
+            "Load and apply the complete prediction_prompt_bundle.execution_prompt. Execute every frozen stage and all 13 "
+            "modules independently for every match; do not shorten, skip, merge, or copy module conclusions. The compact p "
+            "syntax is transport only. Then call completeReplayRange once and do not reply first."
+        ),
     }
 
 
@@ -634,18 +693,23 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
 
     grouped: dict[str, list[dict]] = {task_id: [] for task_id in request.task_ids}
     for key, (task_id, item) in enumerate(index, 1):
-        refs = [section.get("source_url") or f"{section.get('category')}:{section.get('source_sha256', '')[:12]}"
-                for section in item.get("sections", [])]
-        refs = [value for value in refs if value] or [item.get("package_sha256", "masked-evidence")]
-        values, module_codes = supplied[key]
+        evidence_mask, module_refs = _evidence_audit(item)
+        values, claimed_codes = supplied[key]
+        module_codes = "".join("C" if claim == ceiling == "C" else "D"
+                               for claim, ceiling in zip(claimed_codes, evidence_mask))
+        forced = [MODULE_IDS[position] for position, (claim, final)
+                  in enumerate(zip(claimed_codes, module_codes)) if claim != final]
+        refs = [f"{module_id}::{ref}" for module_id, values_for_module in module_refs.items()
+                for ref in (values_for_module or ["unavailable"])]
         grouped[task_id].append({
             "n": item["match_no"],
             "c": item["code"],
             "m": module_codes,
             "e": refs,
             "r": values,
-            "w": ["部分模块因证据不足降级"] if "D" in module_codes else [],
-            "p": "依据冻结提示词，对该场脱敏赛前证据完成十三模块分析后生成。",
+            "w": (["证据不足模块已降级"] if "D" in module_codes else [])
+                 + (["服务器纠正无证据的 COMPLETED：" + ",".join(forced)] if forced else []),
+            "p": "已按完整冻结提示词独立分析十三模块；模块状态经服务器证据审计后冻结。",
         })
 
     commits = []
