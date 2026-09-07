@@ -6,7 +6,25 @@
 
 > Backtest validates prediction. Backtest does not change prediction.
 
-## 一条命令使用
+## 电脑端运行（当前方式）
+
+Windows 可直接双击仓库根目录的 `BACKTEST_WINDOWS.cmd`，然后输入：
+
+```text
+回测 2026-08-01 全部比赛
+```
+
+也可以在 PowerShell 中运行：
+
+```powershell
+.\scripts\backtest.ps1 '回测 2026-08-01 全部比赛'
+```
+
+首次运行会自动创建 `.venv` 并安装依赖。日期范围命令为 `回测 2026-08-01 至 2026-08-07`，最多 7 个自然日。
+
+如需在电脑浏览器中使用 API，可双击 `START_WINDOWS.cmd`，然后打开 `http://127.0.0.1:8000/docs`。回测不再要求通过手机单轮完成；手机预测入口与生产服务不受影响。
+
+## API 服务使用
 
 启动服务：
 
@@ -15,7 +33,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-手机 ChatGPT/Codex 接入本服务的 FastAPI OpenAPI 地址 `/openapi.json` 后，用户只需输入：
+接入本服务的 FastAPI OpenAPI 地址 `/openapi.json` 后，用户可输入：
 
 ```text
 回测 2026-08-01 全部比赛
@@ -33,7 +51,7 @@ python main.py
 
 每一条新的预测或回测命令都必须创建新任务，从重新采集开始完整执行；不得因相同日期、历史记录、旧任务失败或旧任务仍在运行而复用、跳过或拒绝。只有同一次网络请求重试可以复用相同 `request_id`，用于防止传输重试意外重复创建。
 
-正式手机接入与 Docker 部署见 [`docs/MOBILE_COMMAND.md`](docs/MOBILE_COMMAND.md)。
+历史手机接入与 Docker 部署说明见 [`docs/MOBILE_COMMAND.md`](docs/MOBILE_COMMAND.md)；当前推荐电脑端运行。
 
 ## 固定流程
 

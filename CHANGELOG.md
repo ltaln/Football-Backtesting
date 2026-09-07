@@ -2,8 +2,11 @@
 
 ## 2026-09-07
 
+- 回测运行入口调整为电脑端；修复 Windows 首次启动时误用无效 Python 占位命令的问题，本机 API 默认仅监听 `127.0.0.1`。手机预测与生产接口不变。
 - 修复采集时间较长时 GPT 提前结束：`getReplayTask` 在服务器端短时等待状态变化，仍在采集时强制返回继续轮询指令。
 - 私人 GPT 移除“未调用即可报告 `EXECUTION_NOT_STARTED`”的逃生路径，关闭网页搜索与图片生成，并推荐可靠的推理模型，确保回测命令优先使用 Action。
+- 明确最小预测批次中 `n`/`c` 必须逐字复制当前分析页的 `match_no`/`code`，避免 `MIN_RESULT_FIELDS_INVALID`；私人 GPT 改为每页分析后立即保存，再读取下一页。
+- 明确七项预测结果的可解析格式，避免把预测项写成说明性文字而导致 `NOT_EVALUABLE`。
 - 修复手机端日期范围回测未启动：`createReplayTask` 现由服务器将 1–7 天范围拆成逐日全新 Replay Task。
 - 每个日期使用独立、可审计且同请求重试幂等的 `request_id`，并返回真实 `task_id`。
 - 范围创建返回 `CREATED`、`PARTIAL` 或 `FAILED`，失败项保留日期、HTTP 状态和原始错误码。

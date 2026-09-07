@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.command_parser import CommandError, parse_command
 from core.prompt_loader import load_insight_prompt, prompt_binding
@@ -131,17 +131,32 @@ class ReplayAnalysisPageResponse(BaseModel):
 
 
 class ReplayPredictionItem(BaseModel):
-    n: int
-    c: str
-    m: str
-    e: list[str]
-    r: list[str]
-    w: list[str]
-    p: str
+    n: int = Field(description="Copy the exact match_no integer from the current analysis-page match.")
+    c: str = Field(description="Copy the exact code string from that same analysis-page match; never derive or reformat it.")
+    m: str = Field(description="Exactly 13 characters, one per required_module_order item; C=completed, D=degraded.")
+    e: list[str] = Field(description="Non-empty evidence references taken from the current match sections.")
+    r: list[str] = Field(
+        description=(
+            "Exactly seven parseable strings in this fixed order and syntax: "
+            "[1] '精准比分 Top3：1-0 / 1-1 / 2-0'; "
+            "[2] '半全场 Top3：胜/胜 / 平/胜 / 平/平'; "
+            "[3] '亚洲盘：主队 -0.75' (or an explicit PASS); "
+            "[4] '大小球：大 2.5' (or an explicit PASS); "
+            "[5] '胜平负：主胜' where the value is 主胜、平、客胜、主不败、客不败 or PASS; "
+            "[6] '总进球：2-3球' (or one exact integer, or PASS); "
+            "[7] '置信度：0.68'. Never replace a prediction with a reason or evidence summary."
+        )
+    )
+    w: list[str] = Field(description="Warnings and degraded-data notes; use an empty list only when there are none.")
+    p: str = Field(description="Concise prediction reason based only on the current masked evidence.")
 
 
 class ReplayPredictionBatchRequest(BaseModel):
-    p: list[ReplayPredictionItem]
+    p: list[ReplayPredictionItem] = Field(
+        min_length=1,
+        max_length=3,
+        description="One to three current-page matches. For every item, n and c must be copied verbatim from the same match.",
+    )
 
 
 class ReplayPredictionResponse(BaseModel):

@@ -212,6 +212,15 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(response["status"], "AWAITING_GPT")
         self.assertEqual(response["next_operation"], "getReplayAnalysisPage")
 
+    def test_12_min_batch_schema_explains_exact_match_identity(self):
+        from api.backtest_api import app
+
+        item_schema = app.openapi()["components"]["schemas"]["ReplayPredictionItem"]["properties"]
+        self.assertIn("exact match_no", item_schema["n"]["description"])
+        self.assertIn("exact code", item_schema["c"]["description"])
+        self.assertIn("精准比分 Top3：1-0 / 1-1 / 2-0", item_schema["r"]["description"])
+        self.assertIn("Never replace a prediction with a reason", item_schema["r"]["description"])
+
 
 if __name__ == "__main__":
     unittest.main()
