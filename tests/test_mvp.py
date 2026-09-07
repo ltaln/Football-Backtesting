@@ -221,6 +221,41 @@ class MVPTests(unittest.TestCase):
         self.assertIn("精准比分 Top3：1-0 / 1-1 / 2-0", item_schema["r"]["description"])
         self.assertIn("Never replace a prediction with a reason", item_schema["r"]["description"])
 
+    def test_13_range_bundle_collapses_all_days_and_ultra_format(self):
+        from api import backtest_api
+
+        task_ids = ["a" * 32, "b" * 32]
+
+        def fake_prediction_request(method, path, body=None):
+            if path.endswith("/analysis-batch"):
+                day = "2026-08-01" if task_ids[0] in path else "2026-08-02"
+                return {"prompt_bundle": {"prompt_id": "frozen"}, "matches": [{
+                    "date": day, "match_no": 1, "code": day[-2:] + "001",
+                    "kickoff_at_raw": day + " 20:00", "identity_check": {"home": "H", "away": "A"},
+                    "package_sha256": "f" * 64, "result_mask": {"applied": True},
+                    "sections": [{"category": "mixed_data", "source_url": "https://example.test",
+                                  "content": "赛前证据"}],
+                }]}
+            task_id = path.rsplit("/", 1)[-1]
+            return {"id": task_id, "status": "AWAITING_GPT", "blockers": []}
+
+        with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            response = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids,
+            ))
+
+        self.assertTrue(response["ready"])
+        self.assertEqual([item["k"] for item in response["matches"]], [1, 2])
+        self.assertEqual(response["next_operation"], "completeReplayRange")
+        key, values, modules = backtest_api._decode_ultra(
+            "1|1:0,1:1,2:0|HH,DH,DD|H-0.5|U2.5|H|2-3|62|CCCCCCCCCCCCC"
+        )
+        self.assertEqual(key, 1)
+        self.assertIn("主胜", values[4])
+        self.assertEqual(modules, "C" * 13)
+        paths = {route.path for route in backtest_api.app.routes}
+        self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
+
 
 if __name__ == "__main__":
     unittest.main()
