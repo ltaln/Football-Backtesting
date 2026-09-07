@@ -196,6 +196,22 @@ class MVPTests(unittest.TestCase):
             "error": "RESULT_MASK_FAILED",
         }])
 
+    def test_11_replay_status_waits_until_awaiting_gpt(self):
+        from api import backtest_api
+
+        responses = iter([
+            {"id": "fresh-task", "payload": {}, "status": "COLLECTING", "blockers": [],
+             "must_continue": True, "next_operation": "getReplayTask", "instruction": "wait"},
+            {"id": "fresh-task", "payload": {}, "status": "AWAITING_GPT", "blockers": [],
+             "must_continue": False, "next_operation": "getReplayAnalysisPage", "instruction": "analyze"},
+        ])
+        with patch.object(backtest_api, "_prediction_request", side_effect=lambda *_: next(responses)), \
+             patch.object(backtest_api.time, "sleep"):
+            response = backtest_api.get_replay_task("fresh-task")
+
+        self.assertEqual(response["status"], "AWAITING_GPT")
+        self.assertEqual(response["next_operation"], "getReplayAnalysisPage")
+
 
 if __name__ == "__main__":
     unittest.main()

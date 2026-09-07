@@ -2,6 +2,8 @@
 
 ## 2026-09-07
 
+- 修复采集时间较长时 GPT 提前结束：`getReplayTask` 在服务器端短时等待状态变化，仍在采集时强制返回继续轮询指令。
+- 私人 GPT 移除“未调用即可报告 `EXECUTION_NOT_STARTED`”的逃生路径，关闭网页搜索与图片生成，并推荐可靠的推理模型，确保回测命令优先使用 Action。
 - 修复手机端日期范围回测未启动：`createReplayTask` 现由服务器将 1–7 天范围拆成逐日全新 Replay Task。
 - 每个日期使用独立、可审计且同请求重试幂等的 `request_id`，并返回真实 `task_id`。
 - 范围创建返回 `CREATED`、`PARTIAL` 或 `FAILED`，失败项保留日期、HTTP 状态和原始错误码。

@@ -1,6 +1,7 @@
 import os
 import json
 import secrets
+import time
 from datetime import timedelta
 from hashlib import sha256
 from urllib.error import HTTPError, URLError
@@ -354,6 +355,19 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
 @app.get("/replay/tasks/{task_id}", operation_id="getReplayTask", summary="轮询重放采集状态", response_model=ReplayStatusResponse)
 def get_replay_task(task_id: str, _: None = Security(require_token)) -> dict:
     response = _prediction_request("GET", f"/v1/tasks/{task_id}")
+    # Keep model turns focused on useful state changes instead of rapid no-op
+    # polling. Bound the wait so one Action request cannot hang indefinitely.
+    deadline = time.monotonic() + 24
+    while response.get("status") in {"CREATED", "STARTUP_CHECK", "COLLECTING"} and time.monotonic() < deadline:
+        time.sleep(2)
+        response = _prediction_request("GET", f"/v1/tasks/{task_id}")
+    if response.get("status") in {"CREATED", "STARTUP_CHECK", "COLLECTING"}:
+        response["must_continue"] = True
+        response["next_operation"] = "getReplayTask"
+        response["instruction"] = (
+            "Collection is still running after server-side waiting. Call getReplayTask again immediately. "
+            "Do not reply to the user and do not report a pending status."
+        )
     if "prompt_bundle" in response:
         response["prediction_prompt_bundle"] = response.pop("prompt_bundle")
     response["insight_prompt_binding"] = prompt_binding(_insight_prompt)
