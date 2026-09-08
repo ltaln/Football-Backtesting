@@ -55,6 +55,8 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(report["summary"]["total_matches"], 1)
         self.assertFalse(report["improvement_plan"]["auto_apply"])
         self.assertIn("改进方案", report["report_markdown"])
+        self.assertIn("validation_method", report["improvement_plan"]["proposals"][0])
+        self.assertIn("否决标准", report["report_markdown"])
         from api.backtest_api import app
         paths = {route.path for route in app.routes}
         self.assertTrue({"/backtest/run", "/backtest/status/{task_id}", "/backtest/report/{task_id}"} <= paths)

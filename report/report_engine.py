@@ -131,7 +131,12 @@ class ReportEngine:
         if warning:
             lines += [f"> {warning}", ""]
         for index, proposal in enumerate(report["improvement_plan"]["proposals"], 1):
-            lines += [f"{index}. **{proposal['area']} · {proposal['priority']}**：{proposal['finding']}", f"   - {proposal['proposal']}"]
+            lines += [f"{index}. **{proposal['area']} · {proposal['priority']}**：{proposal['finding']}",
+                      f"   - 建议：{proposal['proposal']}", f"   - 假设：{proposal['hypothesis']}",
+                      f"   - 依据：{proposal['basis']}", f"   - 预期影响：{proposal['expected_impact']}",
+                      f"   - 风险：{proposal['risk']}", f"   - 验证方法：{proposal['validation_method']}",
+                      f"   - 通过标准：{proposal['acceptance']}", f"   - 否决标准：{proposal['rejection']}",
+                      f"   - 回滚：{proposal['rollback']}"]
         lines += ["", "## 【版本建议】", "", "- 保持稳定版；候选建议须在独立样本验证，不自动升级。", "",
                   "## 【审计结论】", "", "- 指标与 A–E 根因分布由冻结提交及揭盲赛果支持；模块有效性因缺少独立方向/反事实仍属待验证或数据不足。",
                   "- Upgrade Package 保持 PARKED；不自动修改模型、参数、权重或版本。"]

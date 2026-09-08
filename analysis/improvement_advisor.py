@@ -25,6 +25,18 @@ class ImprovementAdvisor:
             proposals.append({"priority": "HIGH", "area": "CALIBRATION", "finding": f"高置信区间表现不足：{', '.join(weak_high_confidence)}", "proposal": "复核 Calibration 的过度自信样本；禁止基于单批次自动调参。"})
         if not proposals:
             proposals.append({"priority": "LOW", "area": "MONITORING", "finding": "本批次未触发预设异常阈值", "proposal": "保持模型冻结，继续积累分联赛与置信度样本。"})
+        for proposal in proposals:
+            area = proposal["area"]
+            proposal.update({
+                "hypothesis": f"{proposal['finding']}可能与 {area} 环节的输入覆盖、信号解释或校准有关。",
+                "basis": f"本次冻结回测的 {area} 指标/根因统计触发预设审计阈值；这只是候选解释，不是既定因果。",
+                "expected_impact": "若假设成立，应提高目标指标的时间外稳定性，而不是只提高本批次成绩。",
+                "risk": "可能产生过拟合、联赛迁移失效或挤压其他指标；稳定版本不得直接修改。",
+                "validation_method": "冻结当前版为对照，仅在开发候选中单变量改动；使用不少于100场、按时间切分的独立样本复测并分联赛/置信度报告。",
+                "acceptance": "两段独立时期方向一致，目标指标改善，且其他核心指标下降不超过3个百分点。",
+                "rejection": "样本不足、改善只出现在回测集、两段方向不一致，或任一核心指标下降超过3个百分点即否决。",
+                "rollback": "候选失败即丢弃，继续使用当前冻结稳定版及其提示词、参数和权重。",
+            })
         return {
             "auto_apply": False,
             "model_change_allowed": total >= 100,
