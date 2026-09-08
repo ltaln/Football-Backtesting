@@ -702,12 +702,21 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
         key = int(parts[0])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="RANGE_PREDICTION_KEY_INVALID") from exc
-    scores = parts[1].split(",")
-    if len(scores) != 3 or any(not re.fullmatch(r"\d{1,2}:\d{1,2}", value) for value in scores):
-        raise HTTPException(status_code=422, detail=f"RANGE_SCORE_INVALID:{key}")
-    htft = parts[2].split(",")
-    if len(htft) != 3 or any(not re.fullmatch(r"[HDA]{2}", value) for value in htft):
-        raise HTTPException(status_code=422, detail=f"RANGE_HTFT_INVALID:{key}")
+    score_field = parts[1].upper()
+    if score_field in {"P", "PASS"}:
+        scores = []
+    else:
+        scores = [value.strip().replace("-", ":").replace("：", ":")
+                  for value in re.split(r"[,，]", parts[1])]
+        if len(scores) != 3 or any(not re.fullmatch(r"\d{1,2}:\d{1,2}", value) for value in scores):
+            raise HTTPException(status_code=422, detail=f"RANGE_SCORE_INVALID:{key}")
+    htft_field = parts[2].upper()
+    if htft_field in {"P", "PASS"}:
+        htft = []
+    else:
+        htft = [value.strip().upper() for value in re.split(r"[,，]", parts[2])]
+        if len(htft) != 3 or any(not re.fullmatch(r"[HDA]{2}", value) for value in htft):
+            raise HTTPException(status_code=422, detail=f"RANGE_HTFT_INVALID:{key}")
     if not re.fullmatch(r"[CD]{13}", parts[8]):
         raise HTTPException(status_code=422, detail=f"RANGE_MODULE_CODES_INVALID:{key}")
     letter = {"H": "胜", "D": "平", "A": "负"}
@@ -722,8 +731,8 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"RANGE_CONFIDENCE_INVALID:{key}") from exc
     values = [
-        "精准比分 Top3：" + " / ".join(value.replace(":", "-") for value in scores),
-        "半全场 Top3：" + " / ".join(f"{letter[value[0]]}/{letter[value[1]]}" for value in htft),
+        "精准比分 Top3：" + (" / ".join(value.replace(":", "-") for value in scores) if scores else "PASS"),
+        "半全场 Top3：" + (" / ".join(f"{letter[value[0]]}/{letter[value[1]]}" for value in htft) if htft else "PASS"),
         "亚洲盘：" + asian_text,
         "大小球：" + total_text,
         "胜平负：" + result.get(parts[5], "PASS"),

@@ -260,6 +260,15 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(key, 1)
         self.assertIn("主胜", values[4])
         self.assertEqual(modules, "C" * 13)
+        _, pass_values, _ = backtest_api._decode_ultra(
+            "2|PASS|P|P|P|P|P|40|DDDDDDDDDDDDD"
+        )
+        self.assertEqual(pass_values[0], "精准比分 Top3：PASS")
+        self.assertEqual(pass_values[1], "半全场 Top3：PASS")
+        _, hyphen_values, _ = backtest_api._decode_ultra(
+            "3|1-0，1-1，2-0|HH，DH，DD|H-0.5|U2.5|H|2-3|62|CCCCCCCCCCCCC"
+        )
+        self.assertEqual(hyphen_values[0], "精准比分 Top3：1-0 / 1-1 / 2-0")
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
         complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]
