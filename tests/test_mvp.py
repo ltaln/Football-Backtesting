@@ -145,6 +145,7 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(response["day_count"], 6)
         self.assertEqual(response["created_count"], 6)
         self.assertEqual(response["failed_count"], 0)
+        self.assertEqual(response["next_operation"], "getReplayRangeBundle")
         self.assertEqual([item[2]["command"] for item in calls], [
             "回测 2026-07-16 全部比赛",
             "回测 2026-07-17 全部比赛",
@@ -247,6 +248,7 @@ class MVPTests(unittest.TestCase):
             ))
 
         self.assertTrue(response["ready"])
+        self.assertTrue(response["must_continue"])
         self.assertEqual([item["k"] for item in response["matches"]], [1, 2])
         self.assertFalse(response["has_more"])
         self.assertEqual(response["next_operation"], "completeReplayRange")

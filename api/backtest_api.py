@@ -86,6 +86,7 @@ class ReplayRangeBundleResponse(BaseModel):
     prediction_prompt_bundle: dict | None = None
     matches: list[dict] = Field(default_factory=list)
     output_format: str | None = None
+    must_continue: bool
     next_operation: str
     instruction: str
 
@@ -424,12 +425,12 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
     return {
         "created": created_count == day_count,
         "must_continue": created_count == day_count,
-        "next_operation": "getReplayTask" if created_count == day_count else None,
+        "next_operation": "getReplayRangeBundle" if created_count == day_count else None,
         "instruction": (
-            "If errors is non-empty, stop and report each exact date, HTTP status, and error code. Otherwise process "
-            "every returned task in ascending date order through getReplayTask, getReplayAnalysisPage, "
-            "saveReplayPredictionBatch, and finalizeReplayPrediction. Then call evaluateReplayBacktest once with "
-            "the original range command and all new prediction commit IDs in date order. Never reuse an older task or commit."
+            "If errors is non-empty, stop and report each exact date, HTTP status, and error code. Otherwise call "
+            "getReplayRangeBundle with the original command and every returned task_id in ascending date order. "
+            "While must_continue=true, execute next_operation immediately in the same assistant turn and never reply "
+            "with a waiting or pending message. Never poll the six tasks individually and never reuse an older task or commit."
         ),
         "insight_prompt_binding": prompt_binding(_insight_prompt),
         "execution_status": execution_status,
@@ -623,8 +624,12 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         return {
             "ready": False,
             "pending_task_ids": pending,
+            "must_continue": True,
             "next_operation": "getReplayRangeBundle",
-            "instruction": "Call getReplayRangeBundle again immediately with the same command and task_ids. Do not reply.",
+            "instruction": (
+                "Call getReplayRangeBundle again immediately with the same command, all original task_ids, and cursor. "
+                "must_continue=true forbids replying to the user with progress, waiting, or pending status."
+            ),
         }
 
     batches = _range_batches(request.task_ids)
@@ -668,6 +673,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         "has_more": has_more,
         "total_matches": total_matches,
         "prediction_prompt_bundle": prompt_bundle,
+        "must_continue": True,
         "required_module_order": MODULE_IDS,
         "matches": page_matches,
         "output_format": (
