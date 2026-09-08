@@ -631,6 +631,19 @@ def _range_batches(task_ids: list[str]) -> list[dict]:
     return [_prediction_request("GET", f"/v1/tasks/{task_id}/analysis-batch") for task_id in task_ids]
 
 
+def _ready_range_prefix(task_ids: list[str], statuses: list[dict]) -> tuple[list[str], list[str]]:
+    """Return the stable ready date prefix and every task still collecting."""
+    pending_states = {"CREATED", "STARTUP_CHECK", "COLLECTING"}
+    pending = [task_id for task_id, item in zip(task_ids, statuses)
+               if item.get("status") in pending_states]
+    prefix = []
+    for task_id, item in zip(task_ids, statuses):
+        if item.get("status") in pending_states:
+            break
+        prefix.append(task_id)
+    return prefix, pending
+
+
 # Keep each model-facing action comfortably below tool/context limits while
 # preserving the per-match frozen analysis and the server's 3-item persistence.
 RANGE_PAGE_SIZE = 12
@@ -658,12 +671,11 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
                 "tasks": [{"task_id": item.get("id"), "status": item.get("status"),
                            "blockers": item.get("blockers", [])} for item in failed],
             })
-        pending = [item.get("id") for item in statuses
-                   if item.get("status") in {"CREATED", "STARTUP_CHECK", "COLLECTING"}]
-        if not pending or time.monotonic() >= deadline:
+        ready_task_ids, pending = _ready_range_prefix(request.task_ids, statuses)
+        if ready_task_ids or not pending or time.monotonic() >= deadline:
             break
         time.sleep(2)
-    if pending:
+    if pending and not ready_task_ids:
         return {
             "ready": False,
             "pending_task_ids": pending,
@@ -675,10 +687,10 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
             ),
         }
 
-    batches = _range_batches(request.task_ids)
+    batches = _range_batches(ready_task_ids)
     matches = []
     key = 1
-    for task_id, batch in zip(request.task_ids, batches):
+    for task_id, batch in zip(ready_task_ids, batches):
         for item in batch.get("matches", []):
             evidence = []
             for section in item.get("sections", []):
@@ -700,11 +712,22 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
             })
             key += 1
     total_matches = len(matches)
+    if request.cursor >= total_matches and pending:
+        return {
+            "ready": False,
+            "pending_task_ids": pending,
+            "must_continue": True,
+            "next_operation": "getReplayRangeBundle",
+            "instruction": (
+                "The stable ready-date prefix is fully saved. Call getReplayRangeBundle again immediately with the "
+                "same command, all original task_ids, and cursor. Do not reply to the user."
+            ),
+        }
     if request.cursor >= total_matches:
         raise HTTPException(status_code=422, detail="RANGE_CURSOR_INVALID")
     page_matches = matches[request.cursor:request.cursor + RANGE_PAGE_SIZE]
     next_cursor = request.cursor + len(page_matches)
-    has_more = next_cursor < total_matches
+    has_more = next_cursor < total_matches or bool(pending)
     prompt_bundle = (next((batch.get("prompt_bundle") for batch in batches if batch.get("prompt_bundle")), None)
                      if request.cursor == 0 else None)
     return {
@@ -800,9 +823,19 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
 def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Security(require_token)) -> dict:
     """Persist one small page, then close the range only after every page is saved."""
     _range_task_ids(request)
-    batches = _range_batches(request.task_ids)
+    statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+    failed = [item for item in statuses
+              if item.get("status") in {"FAILED", "BLOCKED", "CANCELLED", "PARTIAL"}]
+    if failed:
+        raise HTTPException(status_code=409, detail={
+            "error": "RANGE_REPLAY_TASK_FAILED",
+            "tasks": [{"task_id": item.get("id"), "status": item.get("status"),
+                       "blockers": item.get("blockers", [])} for item in failed],
+        })
+    ready_task_ids, pending = _ready_range_prefix(request.task_ids, statuses)
+    batches = _range_batches(ready_task_ids)
     index = []
-    for task_id, batch in zip(request.task_ids, batches):
+    for task_id, batch in zip(ready_task_ids, batches):
         for item in batch.get("matches", []):
             index.append((task_id, item))
     if request.cursor >= len(index):
@@ -851,7 +884,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
                 "p": predictions[offset:offset + 3],
             })
 
-    if page_end < len(index):
+    if page_end < len(index) or pending:
         return {
             "status": "PAGE_SAVED",
             "task_ids": request.task_ids,

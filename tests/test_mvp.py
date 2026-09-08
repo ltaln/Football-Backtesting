@@ -400,6 +400,36 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(raised.exception.detail["tasks"][0]["status"], "PARTIAL")
 
+    def test_20_range_bundle_streams_stable_ready_date_prefix(self):
+        from api import backtest_api
+
+        task_ids = ["a" * 32, "b" * 32, "c" * 32]
+
+        def fake_prediction_request(method, path, body=None):
+            task_id = next((value for value in task_ids if value in path), None)
+            if path.endswith("/analysis-batch"):
+                self.assertIn(task_id, task_ids[:2])
+                return {"prompt_bundle": {"execution_prompt": "FULL"}, "matches": [{
+                    "date": "2026-08-0" + str(task_ids.index(task_id) + 1),
+                    "match_no": 1, "code": "001", "result_mask": {"applied": True},
+                    "identity_check": {"result": "PASS"}, "sections": [],
+                }]}
+            status = "COLLECTING" if task_id == task_ids[2] else "AWAITING_GPT"
+            return {"id": task_id, "status": status, "blockers": []}
+
+        with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            page = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01 至 2026-08-03", task_ids=task_ids, cursor=0))
+            waiting = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01 至 2026-08-03", task_ids=task_ids, cursor=2))
+
+        self.assertTrue(page["ready"])
+        self.assertEqual([item["k"] for item in page["matches"]], [1, 2])
+        self.assertTrue(page["has_more"])
+        self.assertEqual(page["next_cursor"], 2)
+        self.assertFalse(waiting["ready"])
+        self.assertEqual(waiting["pending_task_ids"], [task_ids[2]])
+
 
 if __name__ == "__main__":
     unittest.main()
