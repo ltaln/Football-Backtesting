@@ -269,6 +269,10 @@ class MVPTests(unittest.TestCase):
             "3|1-0，1-1，2-0|HH，DH，DD|H-0.5|U2.5|H|2-3|62|CCCCCCCCCCCCC"
         )
         self.assertEqual(hyphen_values[0], "精准比分 Top3：1-0 / 1-1 / 2-0")
+        _, slash_values, _ = backtest_api._decode_ultra(
+            "4|1-0,1:1,2-1|H/H,D-H,平/胜|H-0.5|O2.5|H|3|61|CCCCCCCCCCCCC"
+        )
+        self.assertEqual(slash_values[1], "半全场 Top3：胜/胜 / 平/胜 / 平/胜")
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
         complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]

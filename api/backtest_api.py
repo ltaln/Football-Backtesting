@@ -714,7 +714,14 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
     if htft_field in {"P", "PASS"}:
         htft = []
     else:
-        htft = [value.strip().upper() for value in re.split(r"[,，]", parts[2])]
+        htft = []
+        htft_letters = {"胜": "H", "平": "D", "负": "A"}
+        for raw_value in re.split(r"[,，;；]", parts[2]):
+            value = raw_value.strip().upper()
+            for source, target in htft_letters.items():
+                value = value.replace(source, target)
+            value = re.sub(r"[\s/\\:：\-]", "", value)
+            htft.append(value)
         if len(htft) != 3 or any(not re.fullmatch(r"[HDA]{2}", value) for value in htft):
             raise HTTPException(status_code=422, detail=f"RANGE_HTFT_INVALID:{key}")
     if not re.fullmatch(r"[CD]{13}", parts[8]):
