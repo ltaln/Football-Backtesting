@@ -161,6 +161,7 @@ class MVPTests(unittest.TestCase):
             "task-2026-07-16", "task-2026-07-17", "task-2026-07-18",
             "task-2026-07-19", "task-2026-07-20", "task-2026-07-21",
         ])
+        self.assertTrue(all(task["prediction_prompt_bundle"] is None for task in response["tasks"]))
 
     def test_10_replay_range_returns_real_partial_failure_context(self):
         from fastapi import HTTPException
@@ -276,7 +277,7 @@ class MVPTests(unittest.TestCase):
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
         complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]
-        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 50)
+        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 12)
         report_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeReportPageResponse"]
         self.assertIn("must_continue", report_schema["required"])
 

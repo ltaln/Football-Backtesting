@@ -62,9 +62,9 @@ class ReplayRangeRequest(BaseModel):
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
     p: list[str] = Field(
         min_length=1,
-        max_length=50,
+        max_length=12,
         description=(
-            "One ultra-compact prediction per returned k, up to fifty matches in one bounded range batch: "
+            "One ultra-compact prediction per returned k, up to twelve matches in the current range page: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
             "Scores use 1:0; HTFT uses H/D/A pairs; asian H-0.5/A+0.5/P; ou O2.5/U2.5/P; "
             "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D. "
@@ -402,15 +402,23 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         child_request_id = _child_request_id(request.request_id, replay_date)
         child_command = f"回测 {replay_date} 全部比赛"
         try:
-            child = _decorate_replay_create(_prediction_request("POST", "/v1/tasks", {
+            child = _prediction_request("POST", "/v1/tasks", {
                 "request_id": child_request_id,
                 "command": child_command,
-            }))
+            })
             tasks.append({
                 "date": replay_date,
                 "request_id": child_request_id,
                 "command": child_command,
-                **child,
+                "task_id": child["task_id"],
+                "status_url": child["status_url"],
+                "report_url": child["report_url"],
+                "created": child.get("created", True),
+                "must_continue": True,
+                "next_operation": "getReplayRangeBundle",
+                "instruction": "Use this task_id in the single range bundle call; do not poll it separately.",
+                "prediction_prompt_bundle": None,
+                "insight_prompt_binding": prompt_binding(_insight_prompt),
             })
         except HTTPException as exc:
             errors.append({
