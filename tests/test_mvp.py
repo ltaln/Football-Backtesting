@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -287,6 +288,23 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(ErrorAnalyzer().classify(match, evaluation), "B_MODEL_JUDGMENT_ERROR")
         match["error_signals"] = {"information_insufficient": True}
         self.assertEqual(ErrorAnalyzer().classify(match, evaluation), "E_INFORMATION_INSUFFICIENT")
+
+    def test_16_range_completion_response_keeps_full_report_without_raw_duplicates(self):
+        from api.backtest_api import _compact_prompted_report
+
+        report = {
+            "task_id": "BT-compact", "status": "REPORT_READY", "snapshot_id": "SNAP-1",
+            "date_range": "2026-07-22 to 2026-07-27", "pollution_status": "CLEAN",
+            "generated_time": "2026-09-08T00:00:00Z", "summary": {"total_matches": 60},
+            "prediction_commit_ids": ["PC-1"], "matches": [{"raw": "x" * 200000}],
+            "report_markdown": "完整逐场报告\n" + ("明细\n" * 100),
+        }
+        response = _compact_prompted_report(report)
+        self.assertNotIn("matches", response)
+        self.assertEqual(response["report_markdown"], report["report_markdown"])
+        self.assertEqual(response["prompt_bundle"]["content"], _compact_prompted_report(report)["prompt_bundle"]["content"])
+        self.assertEqual(response["prediction_commit_ids"], ["PC-1"])
+        self.assertLess(len(json.dumps(response, ensure_ascii=False).encode("utf-8")), 50000)
 
 
 if __name__ == "__main__":

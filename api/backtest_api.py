@@ -248,6 +248,22 @@ class ReportResponse(BaseModel):
     runtime_instruction: str
 
 
+class ReplayRangeCompleteResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    task_id: str
+    status: str
+    snapshot_id: str
+    date_range: str
+    pollution_status: str
+    generated_time: str
+    summary: dict
+    prediction_commit_ids: list[str]
+    report_markdown: str
+    prompt_bundle: dict
+    runtime_instruction: str
+    report_url: str
+
+
 @app.get("/health", operation_id="healthCheck", response_model=HealthResponse)
 def health() -> HealthResponse:
     return {"status": "ok", "service": "HH520 Insight AI", "version": "Backtest V1.3 Fresh Run",
@@ -262,6 +278,26 @@ def _prompted_report(report: dict) -> dict:
                 "module audits, A-E root causes, calibration, limitations, and testable reversible recommendations. Keep all "
                 "metrics unchanged and treat recommendations as non-automatic candidates only."
             )}
+
+
+def _compact_prompted_report(report: dict) -> dict:
+    """Return the complete narrative without duplicating the large raw match records."""
+    prompted = _prompted_report(report)
+    task_id = prompted["task_id"]
+    return {
+        "task_id": task_id,
+        "status": prompted["status"],
+        "snapshot_id": prompted["snapshot_id"],
+        "date_range": prompted["date_range"],
+        "pollution_status": prompted["pollution_status"],
+        "generated_time": prompted["generated_time"],
+        "summary": prompted["summary"],
+        "prediction_commit_ids": prompted.get("prediction_commit_ids", []),
+        "report_markdown": prompted["report_markdown"],
+        "prompt_bundle": prompted["prompt_bundle"],
+        "runtime_instruction": prompted["runtime_instruction"],
+        "report_url": f"/backtest/report/{task_id}",
+    }
 
 
 @app.post(
@@ -669,8 +705,8 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
 @app.post(
     "/replay/range/complete",
     operation_id="completeReplayRange",
-    summary="一次保存整个范围预测并直接返回最终回测报告",
-    response_model=ReportResponse,
+    summary="一次保存整个范围预测并返回完整但去重的最终回测报告",
+    response_model=ReplayRangeCompleteResponse,
     openapi_extra={"x-openai-isConsequential": False},
 )
 def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Security(require_token)) -> dict:
@@ -728,7 +764,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             raise HTTPException(status_code=409, detail=f"RANGE_COMMIT_MISSING:{task_id}")
         commits.append(commit["prediction_commit_id"])
 
-    return _prompted_report(get_manager().run(request.command, commits))
+    return _compact_prompted_report(get_manager().run(request.command, commits))
 
 
 @app.get("/replay/tasks/{task_id}/analysis-page", operation_id="getReplayAnalysisPage", summary="读取最多两场已脱敏赛前证据；源网站日期目录为日期最高优先级", response_model=ReplayAnalysisPageResponse)
