@@ -11,7 +11,7 @@ from core.config import DEFAULT_SETTINGS, Settings, configure_logging
 from database.db import Database
 from database.models import BacktestTask, EvaluationRecord
 from evaluation.evaluation_engine import EvaluationEngine
-from report.report_engine import ReportEngine
+from report.gpt_fact_report_engine import GPTFactReportEngine
 from snapshot.snapshot_manager import SnapshotManager
 
 WORKFLOW = ["CREATED", "CHECKING_DATA", "COLLECTING", "SANITIZING", "SNAPSHOT_READY", "RUNNING", "EVALUATING", "REPORT_READY"]
@@ -28,7 +28,7 @@ class TaskManager:
         self.snapshots = SnapshotManager(settings.snapshot_dir)
         self.evaluator = EvaluationEngine()
         self.analyzer = ErrorAnalyzer()
-        self.reports = ReportEngine(settings.report_dir)
+        self.reports = GPTFactReportEngine(settings.report_dir)
 
     def run(self, command_text: str, prediction_commit_ids: list[str] | None = None) -> dict:
         command = parse_command(command_text)
