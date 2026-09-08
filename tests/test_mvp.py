@@ -381,6 +381,25 @@ class MVPTests(unittest.TestCase):
         database.complete_replay_run(["c"])
         self.assertEqual(database.activate_replay_run("range-3", "request-3", "third", ["d"]), [])
 
+    def test_19_partial_range_task_fails_with_real_blocker(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        task_ids = ["a" * 32, "b" * 32]
+
+        def fake_prediction_request(method, path, body=None):
+            task_id = path.rsplit("/", 1)[-1]
+            status = "PARTIAL" if task_id == task_ids[0] else "AWAITING_GPT"
+            return {"id": task_id, "status": status,
+                    "blockers": ["COLLECTION_INCOMPLETE"] if status == "PARTIAL" else []}
+
+        with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request), \
+                self.assertRaises(HTTPException) as raised:
+            backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids))
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["tasks"][0]["status"], "PARTIAL")
+
 
 if __name__ == "__main__":
     unittest.main()

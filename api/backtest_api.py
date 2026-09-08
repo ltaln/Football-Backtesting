@@ -650,7 +650,8 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
     deadline = time.monotonic() + 24
     while True:
         statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
-        failed = [item for item in statuses if item.get("status") in {"FAILED", "BLOCKED", "CANCELLED"}]
+        failed = [item for item in statuses
+                  if item.get("status") in {"FAILED", "BLOCKED", "CANCELLED", "PARTIAL"}]
         if failed:
             raise HTTPException(status_code=409, detail={
                 "error": "RANGE_REPLAY_TASK_FAILED",
