@@ -1,4 +1,6 @@
+import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -41,7 +43,40 @@ class Database:
                     prediction_json TEXT NOT NULL, actual_json TEXT NOT NULL,
                     evaluation_json TEXT NOT NULL, error_type TEXT
                 );
+                CREATE TABLE IF NOT EXISTS replay_range_runs (
+                    range_run_id TEXT PRIMARY KEY, parent_request_id TEXT NOT NULL,
+                    command TEXT NOT NULL, task_ids_json TEXT NOT NULL,
+                    status TEXT NOT NULL, created_time REAL NOT NULL
+                );
             """)
+
+    def activate_replay_run(self, range_run_id: str, parent_request_id: str,
+                            command: str, task_ids: list[str]) -> list[str]:
+        """Atomically supersede older active replay groups and return their task ids."""
+        with self.session() as db:
+            active = db.execute(
+                "SELECT range_run_id, task_ids_json FROM replay_range_runs WHERE status='ACTIVE'"
+            ).fetchall()
+            previous = [task_id for row in active if row["range_run_id"] != range_run_id
+                        for task_id in json.loads(row["task_ids_json"])]
+            db.execute(
+                "UPDATE replay_range_runs SET status='SUPERSEDED' WHERE status='ACTIVE' AND range_run_id<>?",
+                (range_run_id,),
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO replay_range_runs VALUES (?, ?, ?, ?, 'ACTIVE', ?)",
+                (range_run_id, parent_request_id, command,
+                 json.dumps(task_ids, separators=(",", ":")), time.time()),
+            )
+        return previous
+
+    def complete_replay_run(self, task_ids: list[str]) -> None:
+        encoded = json.dumps(task_ids, separators=(",", ":"))
+        with self.session() as db:
+            db.execute(
+                "UPDATE replay_range_runs SET status='COMPLETED' WHERE status='ACTIVE' AND task_ids_json=?",
+                (encoded,),
+            )
 
     def create_task(self, task: BacktestTask) -> None:
         with self.session() as db:

@@ -135,7 +135,8 @@ class MVPTests(unittest.TestCase):
                 "prompt_bundle": {"prompt_id": "HH520-PROMPT-V2.1"},
             }
 
-        with patch("api.backtest_api._prediction_request", side_effect=fake_prediction_request):
+        with patch("api.backtest_api._prediction_request", side_effect=fake_prediction_request), \
+             patch("api.backtest_api._activate_latest_replay", return_value=("range-test", ["old-task"])):
             response = create_replay_task(ReplayTaskRequest(
                 request_id="mobile-range-unique",
                 command="回测 2026-07-16 至 2026-07-21",
@@ -146,6 +147,7 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(response["created_count"], 6)
         self.assertEqual(response["failed_count"], 0)
         self.assertEqual(response["next_operation"], "getReplayRangeBundle")
+        self.assertEqual(response["cancelled_previous_task_ids"], ["old-task"])
         self.assertEqual([item[2]["command"] for item in calls], [
             "回测 2026-07-16 全部比赛",
             "回测 2026-07-17 全部比赛",
@@ -168,6 +170,8 @@ class MVPTests(unittest.TestCase):
         from api.backtest_api import ReplayTaskRequest, create_replay_task
 
         def fake_prediction_request(method, path, body=None):
+            if path.endswith("/cancel"):
+                return {"status": "CANCELLED"}
             if "2026-07-18" in body["command"]:
                 raise HTTPException(status_code=503, detail="RESULT_MASK_FAILED")
             replay_date = body["command"].split()[1]
@@ -181,7 +185,8 @@ class MVPTests(unittest.TestCase):
                 "instruction": "continue",
             }
 
-        with patch("api.backtest_api._prediction_request", side_effect=fake_prediction_request):
+        with patch("api.backtest_api._prediction_request", side_effect=fake_prediction_request), \
+             patch("api.backtest_api._activate_latest_replay"):
             response = create_replay_task(ReplayTaskRequest(
                 request_id="mobile-range-partial",
                 command="回测 2026-07-16 至 2026-07-19",
@@ -363,6 +368,18 @@ class MVPTests(unittest.TestCase):
         self.assertTrue(result["replay_mode"])
         self.assertEqual(result["status"], "AWAITING_GPT")
         self.assertEqual(result["next_operation"], "getReplayRangeBundle")
+
+    def test_18_new_replay_run_supersedes_previous_group(self):
+        from database.db import Database
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = Database(Path(temporary.name) / "db.sqlite3")
+        self.assertEqual(database.activate_replay_run("range-1", "request-1", "first", ["a", "b"]), [])
+        self.assertEqual(database.activate_replay_run("range-2", "request-2", "second", ["c"]), ["a", "b"])
+        self.assertEqual(database.activate_replay_run("range-2", "request-2", "second", ["c"]), [])
+        database.complete_replay_run(["c"])
+        self.assertEqual(database.activate_replay_run("range-3", "request-3", "third", ["d"]), [])
 
 
 if __name__ == "__main__":

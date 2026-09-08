@@ -135,6 +135,7 @@ class ReplayCreateResponse(BaseModel):
     failed_count: int | None = None
     tasks: list[ReplayCreatedTask] | None = None
     errors: list[ReplayCreationError] | None = None
+    cancelled_previous_task_ids: list[str] = Field(default_factory=list)
 
 
 class ReplayStatusResponse(BaseModel):
@@ -377,6 +378,17 @@ def _child_request_id(parent_request_id: str, replay_date: str) -> str:
     return f"replay-{digest}"
 
 
+def _activate_latest_replay(parent_request_id: str, command: str,
+                            task_ids: list[str]) -> tuple[str, list[str]]:
+    range_run_id = f"range-{sha256(f'{parent_request_id}:{command}'.encode('utf-8')).hexdigest()[:20]}"
+    previous = get_manager().db.activate_replay_run(range_run_id, parent_request_id, command, task_ids)
+    cancelled = []
+    for task_id in previous:
+        _prediction_request("POST", f"/v1/tasks/{task_id}/cancel", {})
+        cancelled.append(task_id)
+    return range_run_id, cancelled
+
+
 @app.post(
     "/replay/tasks",
     operation_id="createReplayTask",
@@ -393,7 +405,13 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
 
     day_count = (command.end_date - command.start_date).days + 1
     if day_count == 1:
-        return _decorate_replay_create(_prediction_request("POST", "/v1/tasks", request.model_dump()))
+        response = _decorate_replay_create(_prediction_request("POST", "/v1/tasks", request.model_dump()))
+        range_run_id, cancelled = _activate_latest_replay(
+            request.request_id, request.command, [response["task_id"]]
+        )
+        response["range_run_id"] = range_run_id
+        response["cancelled_previous_task_ids"] = cancelled
+        return response
 
     tasks: list[dict] = []
     errors: list[dict] = []
@@ -431,6 +449,17 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
 
     created_count = len(tasks)
     failed_count = len(errors)
+    if failed_count:
+        for task in tasks:
+            try:
+                _prediction_request("POST", f"/v1/tasks/{task['task_id']}/cancel", {})
+            except HTTPException:
+                pass
+    range_run_id, cancelled = (None, [])
+    if created_count == day_count:
+        range_run_id, cancelled = _activate_latest_replay(
+            request.request_id, request.command, [task["task_id"] for task in tasks]
+        )
     execution_status = "CREATED" if failed_count == 0 else ("PARTIAL" if created_count else "FAILED")
     return {
         "created": created_count == day_count,
@@ -444,7 +473,8 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         ),
         "insight_prompt_binding": prompt_binding(_insight_prompt),
         "execution_status": execution_status,
-        "range_run_id": f"range-{sha256(f'{request.request_id}:{request.command}'.encode('utf-8')).hexdigest()[:20]}",
+        "range_run_id": range_run_id,
+        "cancelled_previous_task_ids": cancelled,
         "parent_request_id": request.request_id,
         "start_date": command.start_date.isoformat(),
         "end_date": command.end_date.isoformat(),
@@ -846,6 +876,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
         commits.append(commit["prediction_commit_id"])
 
     report = get_manager().run(request.command, commits)
+    get_manager().db.complete_replay_run(request.task_ids)
     task_id = report["task_id"]
     return {
         "status": "REPORT_READY",
