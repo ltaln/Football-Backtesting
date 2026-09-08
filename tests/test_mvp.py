@@ -278,7 +278,7 @@ class MVPTests(unittest.TestCase):
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
         complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]
-        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 12)
+        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 3)
         report_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeReportPageResponse"]
         self.assertIn("must_continue", report_schema["required"])
 
@@ -330,9 +330,9 @@ class MVPTests(unittest.TestCase):
                 command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=0))
             second = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=3))
-        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3, 4])
-        self.assertIsNone(first["next_cursor"])
-        self.assertFalse(first["has_more"])
+        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3])
+        self.assertEqual(first["next_cursor"], 3)
+        self.assertTrue(first["has_more"])
         self.assertEqual([item["k"] for item in second["matches"]], [4])
         self.assertIsNone(second["prediction_prompt_bundle"])
 

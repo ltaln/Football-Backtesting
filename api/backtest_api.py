@@ -55,16 +55,16 @@ class ReplayTaskRequest(BaseModel):
 
 class ReplayRangeRequest(BaseModel):
     command: str
-    task_ids: list[str] = Field(min_length=1, max_length=7)
+    task_ids: list[str] = Field(min_length=1, max_length=3)
     cursor: int = Field(default=0, ge=0)
 
 
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
     p: list[str] = Field(
         min_length=1,
-        max_length=12,
+        max_length=3,
         description=(
-            "One ultra-compact prediction per returned k, up to twelve matches in the current range page: "
+            "One ultra-compact prediction per returned k, up to three matches in the current range page: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
             "Scores use 1:0; HTFT uses H/D/A pairs; asian H-0.5/A+0.5/P; ou O2.5/U2.5/P; "
             "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D. "
@@ -646,7 +646,7 @@ def _ready_range_prefix(task_ids: list[str], statuses: list[dict]) -> tuple[list
 
 # Keep each model-facing action comfortably below tool/context limits while
 # preserving the per-match frozen analysis and the server's 3-item persistence.
-RANGE_PAGE_SIZE = 12
+RANGE_PAGE_SIZE = 3
 REPORT_PAGE_CHARS = 20000
 
 
