@@ -593,8 +593,10 @@ def _range_batches(task_ids: list[str]) -> list[dict]:
     return [_prediction_request("GET", f"/v1/tasks/{task_id}/analysis-batch") for task_id in task_ids]
 
 
-RANGE_PAGE_SIZE = 50
-REPORT_PAGE_CHARS = 85000
+# Keep each model-facing action comfortably below tool/context limits while
+# preserving the per-match frozen analysis and the server's 3-item persistence.
+RANGE_PAGE_SIZE = 12
+REPORT_PAGE_CHARS = 20000
 
 
 @app.post(
