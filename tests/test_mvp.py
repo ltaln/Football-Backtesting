@@ -262,6 +262,10 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(modules, "C" * 13)
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
+        complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]
+        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 50)
+        report_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeReportPageResponse"]
+        self.assertIn("must_continue", report_schema["required"])
 
     def test_14_missing_score_evidence_forces_correct_score_degradation(self):
         from api.backtest_api import _evidence_audit
@@ -291,7 +295,7 @@ class MVPTests(unittest.TestCase):
         match["error_signals"] = {"information_insufficient": True}
         self.assertEqual(ErrorAnalyzer().classify(match, evaluation), "E_INFORMATION_INSUFFICIENT")
 
-    def test_16_range_evidence_and_report_are_paginated(self):
+    def test_16_range_evidence_is_bounded_and_oversized_report_is_paginated(self):
         from api import backtest_api
 
         task_ids = ["a" * 32, "b" * 32]
@@ -311,20 +315,21 @@ class MVPTests(unittest.TestCase):
                 command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=0))
             second = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=3))
-        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3])
-        self.assertEqual(first["next_cursor"], 3)
-        self.assertTrue(first["has_more"])
+        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3, 4])
+        self.assertIsNone(first["next_cursor"])
+        self.assertFalse(first["has_more"])
         self.assertEqual([item["k"] for item in second["matches"]], [4])
         self.assertIsNone(second["prediction_prompt_bundle"])
 
         class FakeManager:
             @staticmethod
             def report(task_id):
-                return {"report_markdown": "段落\n" * 2500}
+                return {"report_markdown": "段落\n" * 50000}
 
         with patch.object(backtest_api, "get_manager", return_value=FakeManager()):
             page = backtest_api.get_replay_range_report_page("BT-1", cursor=0)
         self.assertTrue(page["has_more"])
+        self.assertTrue(page["must_continue"])
         self.assertLessEqual(len(page["content"]), backtest_api.REPORT_PAGE_CHARS)
         self.assertEqual(page["next_operation"], "getReplayRangeReportPage")
 

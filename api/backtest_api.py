@@ -62,9 +62,9 @@ class ReplayRangeRequest(BaseModel):
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
     p: list[str] = Field(
         min_length=1,
-        max_length=3,
+        max_length=50,
         description=(
-            "One ultra-compact prediction per returned k: "
+            "One ultra-compact prediction per returned k, up to fifty matches in one bounded range batch: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
             "Scores use 1:0; HTFT uses H/D/A pairs; asian H-0.5/A+0.5/P; ou O2.5/U2.5/P; "
             "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D. "
@@ -268,6 +268,7 @@ class ReplayRangeCompleteResponse(BaseModel):
     saved_keys: list[int] = Field(default_factory=list)
     next_cursor: int | None = None
     has_more: bool = False
+    must_continue: bool
     next_operation: str
     instruction: str
     task_id: str | None = None
@@ -288,6 +289,7 @@ class ReplayRangeReportPageResponse(BaseModel):
     next_cursor: int | None
     has_more: bool
     content: str
+    must_continue: bool
     next_operation: str
     instruction: str
 
@@ -591,8 +593,8 @@ def _range_batches(task_ids: list[str]) -> list[dict]:
     return [_prediction_request("GET", f"/v1/tasks/{task_id}/analysis-batch") for task_id in task_ids]
 
 
-RANGE_PAGE_SIZE = 3
-REPORT_PAGE_CHARS = 6000
+RANGE_PAGE_SIZE = 50
+REPORT_PAGE_CHARS = 85000
 
 
 @app.post(
@@ -799,6 +801,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             "saved_keys": sorted(page_keys),
             "next_cursor": page_end,
             "has_more": True,
+            "must_continue": True,
             "next_operation": "getReplayRangeBundle",
             "instruction": (
                 f"Call getReplayRangeBundle immediately with cursor={page_end}, the same command and task_ids. "
@@ -823,6 +826,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
         "task_ids": request.task_ids,
         "saved_keys": sorted(page_keys),
         "has_more": False,
+        "must_continue": True,
         "next_operation": "getReplayRangeReportPage",
         "instruction": (
             "Call getReplayRangeReportPage immediately with this task_id and cursor=0. Continue until has_more=false; "
@@ -868,6 +872,7 @@ def get_replay_range_report_page(task_id: str, cursor: int = 0,
         "next_cursor": end if has_more else None,
         "has_more": has_more,
         "content": markdown[cursor:end],
+        "must_continue": has_more,
         "next_operation": "getReplayRangeReportPage" if has_more else "final_response",
         "instruction": (
             f"Call getReplayRangeReportPage immediately with cursor={end}; do not reply yet."
