@@ -45,7 +45,7 @@ python main.py
 回测 2026-08-01至2026-08-07
 ```
 
-最多 7 个自然日；超过限制返回 `BACKTEST_WINDOW_LIMIT_EXCEEDED`，不会自动拆分。
+最多 3 个自然日；超过限制返回 `BACKTEST_WINDOW_LIMIT_EXCEEDED`，不会自动拆分。
 
 回测不设固定时间，也不自动定时执行；开始日期、结束日期和执行时机完全由用户在手机 GPT 命令中决定。
 

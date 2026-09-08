@@ -61,13 +61,13 @@ class MVPTests(unittest.TestCase):
         paths = {route.path for route in app.routes}
         self.assertTrue({"/backtest/run", "/backtest/status/{task_id}", "/backtest/report/{task_id}"} <= paths)
 
-    def test_2_seven_day_range_succeeds(self):
-        report = self.run_command("回测 2026-08-01至2026-08-07")
+    def test_2_three_day_range_succeeds(self):
+        report = self.run_command("回测 2026-08-01至2026-08-03")
         self.assertEqual(report["status"], "REPORT_READY")
 
-    def test_3_eight_day_range_is_rejected(self):
+    def test_3_four_day_range_is_rejected(self):
         with self.assertRaisesRegex(CommandError, "BACKTEST_WINDOW_LIMIT_EXCEEDED"):
-            parse_command("回测 2026-08-01至2026-08-08")
+            parse_command("回测 2026-08-01至2026-08-04")
 
     def test_4_pollution_fields_do_not_enter_snapshot_input(self):
         clean, audit = sanitize_prediction_input(MATCH["prediction_input"])
@@ -139,12 +139,12 @@ class MVPTests(unittest.TestCase):
              patch("api.backtest_api._activate_latest_replay", return_value=("range-test", ["old-task"])):
             response = create_replay_task(ReplayTaskRequest(
                 request_id="mobile-range-unique",
-                command="回测 2026-07-16 至 2026-07-21",
+                command="回测 2026-07-16 至 2026-07-18",
             ))
 
         self.assertEqual(response["execution_status"], "CREATED")
-        self.assertEqual(response["day_count"], 6)
-        self.assertEqual(response["created_count"], 6)
+        self.assertEqual(response["day_count"], 3)
+        self.assertEqual(response["created_count"], 3)
         self.assertEqual(response["failed_count"], 0)
         self.assertEqual(response["next_operation"], "getReplayRangeBundle")
         self.assertEqual(response["cancelled_previous_task_ids"], ["old-task"])
@@ -152,16 +152,12 @@ class MVPTests(unittest.TestCase):
             "回测 2026-07-16 全部比赛",
             "回测 2026-07-17 全部比赛",
             "回测 2026-07-18 全部比赛",
-            "回测 2026-07-19 全部比赛",
-            "回测 2026-07-20 全部比赛",
-            "回测 2026-07-21 全部比赛",
         ])
         child_request_ids = [item[2]["request_id"] for item in calls]
-        self.assertEqual(len(set(child_request_ids)), 6)
+        self.assertEqual(len(set(child_request_ids)), 3)
         self.assertTrue(all(value != "mobile-range-unique" for value in child_request_ids))
         self.assertEqual([task["task_id"] for task in response["tasks"]], [
             "task-2026-07-16", "task-2026-07-17", "task-2026-07-18",
-            "task-2026-07-19", "task-2026-07-20", "task-2026-07-21",
         ])
         self.assertTrue(all(task["prediction_prompt_bundle"] is None for task in response["tasks"]))
 
@@ -189,11 +185,11 @@ class MVPTests(unittest.TestCase):
              patch("api.backtest_api._activate_latest_replay"):
             response = create_replay_task(ReplayTaskRequest(
                 request_id="mobile-range-partial",
-                command="回测 2026-07-16 至 2026-07-19",
+                command="回测 2026-07-16 至 2026-07-18",
             ))
 
         self.assertEqual(response["execution_status"], "PARTIAL")
-        self.assertEqual(response["created_count"], 3)
+        self.assertEqual(response["created_count"], 2)
         self.assertEqual(response["failed_count"], 1)
         self.assertFalse(response["must_continue"])
         self.assertIsNone(response["next_operation"])

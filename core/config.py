@@ -8,7 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class Settings:
-    max_backtest_days: int = 7
+    max_backtest_days: int = 3
     database_path: Path = Path(os.getenv("HH520_DATABASE", BASE_DIR / "data" / "hh520_backtest.db"))
     snapshot_dir: Path = Path(os.getenv("HH520_SNAPSHOT_DIR", BASE_DIR / "data" / "snapshots"))
     archive_dir: Path = Path(os.getenv("HH520_ARCHIVE_DIR", BASE_DIR / "data" / "archive"))

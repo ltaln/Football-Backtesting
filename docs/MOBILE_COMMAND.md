@@ -33,7 +33,7 @@
 https://你的域名/openapi.json
 ```
 
-认证方式选择 Bearer，值为部署时的 `HH520_API_TOKEN`。私人 GPT 收到命令后的第一步必须实际调用 `createReplayTask`，不得先回复用户。该动作支持单日或最多 7 天的日期范围；范围拆分由服务器完成，并为每个自然日生成独立 `request_id` 和全新的 Replay Task。返回后，私人 GPT 按日期顺序等待每个任务采集完成、读取脱敏页、按冻结模型提交预测，最后把本次所有新 Commit 交给 `evaluateReplayBacktest`。
+认证方式选择 Bearer，值为部署时的 `HH520_API_TOKEN`。私人 GPT 收到命令后的第一步必须实际调用 `createReplayTask`，不得先回复用户。该动作支持单日或最多 3 天的日期范围；范围拆分由服务器完成，并为每个自然日生成独立 `request_id` 和全新的 Replay Task。返回后，私人 GPT 按日期顺序等待每个任务采集完成、读取脱敏页、按冻结模型提交预测，最后把本次所有新 Commit 交给 `evaluateReplayBacktest`。
 
 如果 `createReplayTask` 返回 `PARTIAL` 或 `FAILED`，私人 GPT 必须逐项报告 `errors` 中的日期、HTTP 状态和真实错误码；如果没有收到动作响应，则只能报告 `EXECUTION_NOT_STARTED`，不得伪造 `task_id`、`commit_id` 或预测结果。不得复用上一轮的任务或 Prediction Commit。
 

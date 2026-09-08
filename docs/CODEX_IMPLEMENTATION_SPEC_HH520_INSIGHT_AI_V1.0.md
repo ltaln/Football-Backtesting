@@ -31,7 +31,7 @@ V1 禁止实现：DNA Engine、Tail Risk、Candidate Model、Shadow Test、自�
 
 支持：`回测 2026-08-01 全部比赛` 与 `回测 2026-08-01至2026-08-07`。输出 `type=BACKTEST`、`start_date`、`end_date`。
 
-`MAX_BACKTEST_DAYS = 7`。超过 7 天返回 `BACKTEST_WINDOW_LIMIT_EXCEEDED`，禁止自动拆分。
+`MAX_BACKTEST_DAYS = 3`。超过 3 天返回 `BACKTEST_WINDOW_LIMIT_EXCEEDED`，禁止自动拆分。
 
 ## 5. 任务流程
 
