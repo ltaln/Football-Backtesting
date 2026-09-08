@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 from copy import deepcopy
@@ -249,6 +248,7 @@ class MVPTests(unittest.TestCase):
 
         self.assertTrue(response["ready"])
         self.assertEqual([item["k"] for item in response["matches"]], [1, 2])
+        self.assertFalse(response["has_more"])
         self.assertEqual(response["next_operation"], "completeReplayRange")
         self.assertEqual(response["prediction_prompt_bundle"]["execution_prompt"], "FULL FROZEN PROMPT")
         self.assertNotIn("CCCCCCCCCCCCC", response["output_format"])
@@ -289,22 +289,42 @@ class MVPTests(unittest.TestCase):
         match["error_signals"] = {"information_insufficient": True}
         self.assertEqual(ErrorAnalyzer().classify(match, evaluation), "E_INFORMATION_INSUFFICIENT")
 
-    def test_16_range_completion_response_keeps_full_report_without_raw_duplicates(self):
-        from api.backtest_api import _compact_prompted_report
+    def test_16_range_evidence_and_report_are_paginated(self):
+        from api import backtest_api
 
-        report = {
-            "task_id": "BT-compact", "status": "REPORT_READY", "snapshot_id": "SNAP-1",
-            "date_range": "2026-07-22 to 2026-07-27", "pollution_status": "CLEAN",
-            "generated_time": "2026-09-08T00:00:00Z", "summary": {"total_matches": 60},
-            "prediction_commit_ids": ["PC-1"], "matches": [{"raw": "x" * 200000}],
-            "report_markdown": "完整逐场报告\n" + ("明细\n" * 100),
-        }
-        response = _compact_prompted_report(report)
-        self.assertNotIn("matches", response)
-        self.assertEqual(response["report_markdown"], report["report_markdown"])
-        self.assertEqual(response["prompt_bundle"]["content"], _compact_prompted_report(report)["prompt_bundle"]["content"])
-        self.assertEqual(response["prediction_commit_ids"], ["PC-1"])
-        self.assertLess(len(json.dumps(response, ensure_ascii=False).encode("utf-8")), 50000)
+        task_ids = ["a" * 32, "b" * 32]
+
+        def fake_prediction_request(method, path, body=None):
+            if path.endswith("/analysis-batch"):
+                day = "2026-08-01" if task_ids[0] in path else "2026-08-02"
+                return {"prompt_bundle": {"execution_prompt": "FULL"}, "matches": [{
+                    "date": day, "match_no": n, "code": f"{day[-2:]}00{n}",
+                    "result_mask": {"applied": True}, "identity_check": {"result": "PASS"},
+                    "sections": [{"category": "mixed_data", "source_url": "ref", "content": "赛前证据"}],
+                } for n in (1, 2)]}
+            return {"id": path.rsplit("/", 1)[-1], "status": "AWAITING_GPT", "blockers": []}
+
+        with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            first = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=0))
+            second = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=3))
+        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3])
+        self.assertEqual(first["next_cursor"], 3)
+        self.assertTrue(first["has_more"])
+        self.assertEqual([item["k"] for item in second["matches"]], [4])
+        self.assertIsNone(second["prediction_prompt_bundle"])
+
+        class FakeManager:
+            @staticmethod
+            def report(task_id):
+                return {"report_markdown": "段落\n" * 2500}
+
+        with patch.object(backtest_api, "get_manager", return_value=FakeManager()):
+            page = backtest_api.get_replay_range_report_page("BT-1", cursor=0)
+        self.assertTrue(page["has_more"])
+        self.assertLessEqual(len(page["content"]), backtest_api.REPORT_PAGE_CHARS)
+        self.assertEqual(page["next_operation"], "getReplayRangeReportPage")
 
 
 if __name__ == "__main__":

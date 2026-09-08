@@ -56,12 +56,13 @@ class ReplayTaskRequest(BaseModel):
 class ReplayRangeRequest(BaseModel):
     command: str
     task_ids: list[str] = Field(min_length=1, max_length=7)
+    cursor: int = Field(default=0, ge=0)
 
 
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
     p: list[str] = Field(
         min_length=1,
-        max_length=999,
+        max_length=3,
         description=(
             "One ultra-compact prediction per returned k: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
@@ -78,6 +79,10 @@ class ReplayRangeBundleResponse(BaseModel):
     replay_mode: bool | None = None
     task_ids: list[str] = Field(default_factory=list)
     pending_task_ids: list[str] = Field(default_factory=list)
+    cursor: int = 0
+    next_cursor: int | None = None
+    has_more: bool = False
+    total_matches: int = 0
     prediction_prompt_bundle: dict | None = None
     matches: list[dict] = Field(default_factory=list)
     output_format: str | None = None
@@ -250,18 +255,33 @@ class ReportResponse(BaseModel):
 
 class ReplayRangeCompleteResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
+    status: str
+    task_ids: list[str] = Field(default_factory=list)
+    saved_keys: list[int] = Field(default_factory=list)
+    next_cursor: int | None = None
+    has_more: bool = False
+    next_operation: str
+    instruction: str
+    task_id: str | None = None
+    snapshot_id: str | None = None
+    date_range: str | None = None
+    pollution_status: str | None = None
+    generated_time: str | None = None
+    summary: dict | None = None
+    prediction_commit_ids: list[str] = Field(default_factory=list)
+    prompt_bundle: dict | None = None
+    report_url: str | None = None
+
+
+class ReplayRangeReportPageResponse(BaseModel):
     task_id: str
     status: str
-    snapshot_id: str
-    date_range: str
-    pollution_status: str
-    generated_time: str
-    summary: dict
-    prediction_commit_ids: list[str]
-    report_markdown: str
-    prompt_bundle: dict
-    runtime_instruction: str
-    report_url: str
+    cursor: int
+    next_cursor: int | None
+    has_more: bool
+    content: str
+    next_operation: str
+    instruction: str
 
 
 @app.get("/health", operation_id="healthCheck", response_model=HealthResponse)
@@ -278,26 +298,6 @@ def _prompted_report(report: dict) -> dict:
                 "module audits, A-E root causes, calibration, limitations, and testable reversible recommendations. Keep all "
                 "metrics unchanged and treat recommendations as non-automatic candidates only."
             )}
-
-
-def _compact_prompted_report(report: dict) -> dict:
-    """Return the complete narrative without duplicating the large raw match records."""
-    prompted = _prompted_report(report)
-    task_id = prompted["task_id"]
-    return {
-        "task_id": task_id,
-        "status": prompted["status"],
-        "snapshot_id": prompted["snapshot_id"],
-        "date_range": prompted["date_range"],
-        "pollution_status": prompted["pollution_status"],
-        "generated_time": prompted["generated_time"],
-        "summary": prompted["summary"],
-        "prediction_commit_ids": prompted.get("prediction_commit_ids", []),
-        "report_markdown": prompted["report_markdown"],
-        "prompt_bundle": prompted["prompt_bundle"],
-        "runtime_instruction": prompted["runtime_instruction"],
-        "report_url": f"/backtest/report/{task_id}",
-    }
 
 
 @app.post(
@@ -583,6 +583,10 @@ def _range_batches(task_ids: list[str]) -> list[dict]:
     return [_prediction_request("GET", f"/v1/tasks/{task_id}/analysis-batch") for task_id in task_ids]
 
 
+RANGE_PAGE_SIZE = 3
+REPORT_PAGE_CHARS = 6000
+
+
 @app.post(
     "/replay/range/bundle",
     operation_id="getReplayRangeBundle",
@@ -640,14 +644,25 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
                 "mask": bool(result_mask.get("applied")) if isinstance(result_mask, dict) else bool(result_mask),
             })
             key += 1
-    prompt_bundle = next((batch.get("prompt_bundle") for batch in batches if batch.get("prompt_bundle")), None)
+    total_matches = len(matches)
+    if request.cursor >= total_matches:
+        raise HTTPException(status_code=422, detail="RANGE_CURSOR_INVALID")
+    page_matches = matches[request.cursor:request.cursor + RANGE_PAGE_SIZE]
+    next_cursor = request.cursor + len(page_matches)
+    has_more = next_cursor < total_matches
+    prompt_bundle = (next((batch.get("prompt_bundle") for batch in batches if batch.get("prompt_bundle")), None)
+                     if request.cursor == 0 else None)
     return {
         "ready": True,
         "replay_mode": True,
         "task_ids": request.task_ids,
+        "cursor": request.cursor,
+        "next_cursor": next_cursor if has_more else None,
+        "has_more": has_more,
+        "total_matches": total_matches,
         "prediction_prompt_bundle": prompt_bundle,
         "required_module_order": MODULE_IDS,
-        "matches": matches,
+        "matches": page_matches,
         "output_format": (
             "Return every k exactly once in p using: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|module_codes. "
@@ -657,8 +672,9 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         "next_operation": "completeReplayRange",
         "instruction": (
             "Load and apply the complete prediction_prompt_bundle.execution_prompt. Execute every frozen stage and all 13 "
-            "modules independently for every match; do not shorten, skip, merge, or copy module conclusions. The compact p "
-            "syntax is transport only. Then call completeReplayRange once and do not reply first."
+            "modules independently for every returned match; do not shorten, skip, merge, or copy module conclusions. On "
+            "later pages continue using the complete prompt loaded at cursor 0. The compact p syntax is transport only. "
+            "Call completeReplayRange with this exact cursor and page predictions; do not reply first."
         ),
     }
 
@@ -710,25 +726,29 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
     openapi_extra={"x-openai-isConsequential": False},
 )
 def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Security(require_token)) -> dict:
-    """Keep the model-generated request below Actions' size limit, then close the range server-side."""
+    """Persist one small page, then close the range only after every page is saved."""
     _range_task_ids(request)
     batches = _range_batches(request.task_ids)
     index = []
     for task_id, batch in zip(request.task_ids, batches):
         for item in batch.get("matches", []):
             index.append((task_id, item))
+    if request.cursor >= len(index):
+        raise HTTPException(status_code=422, detail="RANGE_CURSOR_INVALID")
+    page_end = min(request.cursor + RANGE_PAGE_SIZE, len(index))
+    page_keys = set(range(request.cursor + 1, page_end + 1))
     supplied = {}
     for line in request.p:
         key, values, module_codes = _decode_ultra(line)
         if key in supplied:
             raise HTTPException(status_code=422, detail=f"RANGE_PREDICTION_DUPLICATE:{key}")
         supplied[key] = (values, module_codes)
-    required = set(range(1, len(index) + 1))
-    if set(supplied) != required:
+    if set(supplied) != page_keys:
         raise HTTPException(status_code=422, detail="RANGE_PREDICTION_SET_INCOMPLETE")
 
     grouped: dict[str, list[dict]] = {task_id: [] for task_id in request.task_ids}
-    for key, (task_id, item) in enumerate(index, 1):
+    for key in sorted(page_keys):
+        task_id, item = index[key - 1]
         evidence_mask, module_refs = _evidence_audit(item)
         values, claimed_codes = supplied[key]
         module_codes = "".join("C" if claim == ceiling == "C" else "D"
@@ -748,23 +768,101 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             "p": "已按完整冻结提示词独立分析十三模块；模块状态经服务器证据审计后冻结。",
         })
 
+    for task_id, predictions in grouped.items():
+        if not predictions:
+            continue
+        status = _prediction_request("GET", f"/v1/tasks/{task_id}")
+        if status.get("status") == "COMPLETED" and status.get("prediction_commit"):
+            continue
+        for offset in range(0, len(predictions), 3):
+            _prediction_request("POST", f"/v1/tasks/{task_id}/analysis-min", {
+                "p": predictions[offset:offset + 3],
+            })
+
+    if page_end < len(index):
+        return {
+            "status": "PAGE_SAVED",
+            "task_ids": request.task_ids,
+            "saved_keys": sorted(page_keys),
+            "next_cursor": page_end,
+            "has_more": True,
+            "next_operation": "getReplayRangeBundle",
+            "instruction": (
+                f"Call getReplayRangeBundle immediately with cursor={page_end}, the same command and task_ids. "
+                "Continue using the complete frozen prediction prompt loaded at cursor 0. Do not reply."
+            ),
+        }
+
     commits = []
     for task_id in request.task_ids:
         status = _prediction_request("GET", f"/v1/tasks/{task_id}")
-        if status.get("status") == "COMPLETED" and status.get("prediction_commit"):
-            commits.append(status["prediction_commit"]["prediction_commit_id"])
-            continue
-        response = None
-        for offset in range(0, len(grouped[task_id]), 3):
-            response = _prediction_request("POST", f"/v1/tasks/{task_id}/analysis-min", {
-                "p": grouped[task_id][offset:offset + 3],
-            })
-        commit = (response or {}).get("prediction_commit") or {}
+        if status.get("status") != "COMPLETED" or not status.get("prediction_commit"):
+            status = _prediction_request("POST", f"/v1/tasks/{task_id}/finalize-compact", {})
+        commit = status.get("prediction_commit") or {}
         if not commit.get("prediction_commit_id"):
             raise HTTPException(status_code=409, detail=f"RANGE_COMMIT_MISSING:{task_id}")
         commits.append(commit["prediction_commit_id"])
 
-    return _compact_prompted_report(get_manager().run(request.command, commits))
+    report = get_manager().run(request.command, commits)
+    task_id = report["task_id"]
+    return {
+        "status": "REPORT_READY",
+        "task_ids": request.task_ids,
+        "saved_keys": sorted(page_keys),
+        "has_more": False,
+        "next_operation": "getReplayRangeReportPage",
+        "instruction": (
+            "Call getReplayRangeReportPage immediately with this task_id and cursor=0. Continue until has_more=false; "
+            "do not reply before all report pages are read. Then apply the complete prompt_bundle.content and output the "
+            "detailed report without shortening or skipping required sections."
+        ),
+        "task_id": task_id,
+        "snapshot_id": report["snapshot_id"],
+        "date_range": report["date_range"],
+        "pollution_status": report["pollution_status"],
+        "generated_time": report["generated_time"],
+        "summary": report["summary"],
+        "prediction_commit_ids": commits,
+        "prompt_bundle": _insight_prompt,
+        "report_url": f"/backtest/report/{task_id}",
+    }
+
+
+@app.get(
+    "/replay/range/report/{task_id}/page",
+    operation_id="getReplayRangeReportPage",
+    summary="分页读取完整范围回测报告",
+    response_model=ReplayRangeReportPageResponse,
+)
+def get_replay_range_report_page(task_id: str, cursor: int = 0,
+                                 _: None = Security(require_token)) -> dict:
+    report = get_manager().report(task_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="REPORT_NOT_FOUND")
+    markdown = report["report_markdown"]
+    if cursor < 0 or cursor >= len(markdown):
+        raise HTTPException(status_code=422, detail="REPORT_CURSOR_INVALID")
+    end = min(cursor + REPORT_PAGE_CHARS, len(markdown))
+    if end < len(markdown):
+        newline = markdown.rfind("\n", cursor, end)
+        if newline > cursor:
+            end = newline + 1
+    has_more = end < len(markdown)
+    return {
+        "task_id": task_id,
+        "status": "REPORT_READY",
+        "cursor": cursor,
+        "next_cursor": end if has_more else None,
+        "has_more": has_more,
+        "content": markdown[cursor:end],
+        "next_operation": "getReplayRangeReportPage" if has_more else "final_response",
+        "instruction": (
+            f"Call getReplayRangeReportPage immediately with cursor={end}; do not reply yet."
+            if has_more else
+            "All report pages are loaded. Apply the complete Insight prompt already returned by completeReplayRange and "
+            "output the complete detailed Chinese report now."
+        ),
+    }
 
 
 @app.get("/replay/tasks/{task_id}/analysis-page", operation_id="getReplayAnalysisPage", summary="读取最多两场已脱敏赛前证据；源网站日期目录为日期最高优先级", response_model=ReplayAnalysisPageResponse)
