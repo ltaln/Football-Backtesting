@@ -326,6 +326,23 @@ class MVPTests(unittest.TestCase):
         self.assertLessEqual(len(page["content"]), backtest_api.REPORT_PAGE_CHARS)
         self.assertEqual(page["next_operation"], "getReplayRangeReportPage")
 
+    def test_17_backtest_status_falls_back_to_persisted_replay_task(self):
+        from api import backtest_api
+
+        class FakeManager:
+            @staticmethod
+            def status(task_id):
+                return None
+
+        replay = {"id": "4" * 32, "payload": {"date": "2026-07-22"},
+                  "status": "AWAITING_GPT", "created": 1, "blockers": []}
+        with patch.object(backtest_api, "get_manager", return_value=FakeManager()), \
+                patch.object(backtest_api, "_prediction_request", return_value=replay):
+            result = backtest_api.get_status("4" * 32)
+        self.assertTrue(result["replay_mode"])
+        self.assertEqual(result["status"], "AWAITING_GPT")
+        self.assertEqual(result["next_operation"], "getReplayRangeBundle")
+
 
 if __name__ == "__main__":
     unittest.main()

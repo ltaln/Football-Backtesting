@@ -229,12 +229,19 @@ class HealthResponse(BaseModel):
 
 
 class TaskStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     task_id: str
     start_date: str
     end_date: str
     status: str
     snapshot_id: str | None
     created_time: str
+    replay_mode: bool = False
+    blockers: list[str] = Field(default_factory=list)
+    must_continue: bool = False
+    next_operation: str | None = None
+    instruction: str | None = None
+    prediction_commit: dict | None = None
 
 
 class ReportResponse(BaseModel):
@@ -892,9 +899,30 @@ def get_replay_prediction_report(task_id: str, _: None = Security(require_token)
 @app.get("/backtest/status/{task_id}", operation_id="getBacktestStatus", response_model=TaskStatusResponse)
 def get_status(task_id: str, _: None = Security(require_token)) -> dict:
     task = get_manager().status(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="TASK_NOT_FOUND")
-    return task
+    if task is not None:
+        return task
+    replay = _prediction_request("GET", f"/v1/tasks/{task_id}")
+    replay_date = str((replay.get("payload") or {}).get("date") or "UNKNOWN")
+    status = replay.get("status", "UNKNOWN")
+    must_continue = status in {"CREATED", "STARTUP_CHECK", "COLLECTING", "AWAITING_GPT"}
+    return {
+        "task_id": replay.get("id", task_id),
+        "start_date": replay_date,
+        "end_date": replay_date,
+        "status": status,
+        "snapshot_id": (replay.get("input_ref") or {}).get("snapshot_id"),
+        "created_time": str(replay.get("created", "")),
+        "replay_mode": True,
+        "blockers": replay.get("blockers", []),
+        "must_continue": must_continue,
+        "next_operation": "getReplayRangeBundle" if must_continue else None,
+        "instruction": (
+            "This is a Replay task, not a missing backtest report task. Continue the active range workflow with "
+            "getReplayRangeBundle; do not recreate tasks and do not report TASK_NOT_FOUND."
+            if must_continue else None
+        ),
+        "prediction_commit": replay.get("prediction_commit"),
+    }
 
 
 @app.get("/backtest/report/{task_id}", operation_id="getBacktestReport", response_model=ReportResponse)
