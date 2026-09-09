@@ -765,6 +765,19 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(result["status"], "AWAITING_GPT")
         self.assertEqual(attempts, 3)
 
+    def test_34_gateway_transport_budget_stays_below_action_timeout(self):
+        from api import backtest_api
+
+        inner_budget = (
+            (len(backtest_api.GATEWAY_RETRY_DELAYS) + 1) * backtest_api.GATEWAY_REQUEST_TIMEOUT
+            + sum(backtest_api.GATEWAY_RETRY_DELAYS)
+        )
+        range_budget = (
+            (len(backtest_api.RANGE_GATEWAY_RETRY_DELAYS) + 1) * inner_budget
+            + sum(backtest_api.RANGE_GATEWAY_RETRY_DELAYS)
+        )
+        self.assertLess(range_budget, 20)
+
     def test_30_date_only_resume_recovers_first_unsaved_cursor(self):
         from api import backtest_api
 

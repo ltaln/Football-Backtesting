@@ -356,6 +356,10 @@ def evaluate_replay(request: RunRequest, _: None = Security(require_token)) -> d
     return run_backtest(request, _)
 
 
+GATEWAY_REQUEST_TIMEOUT = 2.0
+GATEWAY_RETRY_DELAYS = (0.1, 0.2)
+
+
 def _prediction_request(method: str, path: str, body: dict | None = None) -> dict:
     base = os.getenv("HH520_PREDICTION_INTERNAL_URL", "http://gateway:8765").rstrip("/")
     token = os.getenv("HH520_PREDICTION_TOKEN", "").strip()
@@ -366,10 +370,17 @@ def _prediction_request(method: str, path: str, body: dict | None = None) -> dic
     if data is not None:
         headers["Content-Type"] = "application/json"
     retryable_statuses = {429, 500, 502, 503, 504}
-    retry_delays = (0.25, 0.5, 0.75)
+    # The gateway is on the same Docker network and normally answers in under one
+    # second. Keep the worst-case transport budget below the ChatGPT Action
+    # timeout so callers receive a structured retry response instead of a
+    # platform-level "outbound call did not succeed" error.
+    retry_delays = GATEWAY_RETRY_DELAYS
     for attempt in range(len(retry_delays) + 1):
         try:
-            with urlopen(Request(base + path, data=data, headers=headers, method=method), timeout=5) as response:
+            with urlopen(
+                Request(base + path, data=data, headers=headers, method=method),
+                timeout=GATEWAY_REQUEST_TIMEOUT,
+            ) as response:
                 raw = response.read()
                 if not raw or not raw.strip():
                     raise ValueError("empty response")
@@ -407,7 +418,7 @@ def _is_transient_gateway_error(exc: HTTPException) -> bool:
     )
 
 
-RANGE_GATEWAY_RETRY_DELAYS = (2, 4, 6, 8)
+RANGE_GATEWAY_RETRY_DELAYS = (0.25, 0.5)
 
 
 def _range_gateway_call(callback):
