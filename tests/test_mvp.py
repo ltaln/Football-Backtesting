@@ -250,6 +250,7 @@ class MVPTests(unittest.TestCase):
             ))
 
         self.assertTrue(response["ready"])
+        self.assertEqual(response["control_state"], "PREDICT_AND_SUBMIT")
         self.assertTrue(response["must_continue"])
         self.assertEqual([item["k"] for item in response["matches"]], [1, 2])
         self.assertFalse(response["has_more"])
@@ -347,6 +348,32 @@ class MVPTests(unittest.TestCase):
         self.assertTrue(page["must_continue"])
         self.assertLessEqual(len(page["content"]), backtest_api.REPORT_PAGE_CHARS)
         self.assertEqual(page["next_operation"], "getReplayRangeReportPage")
+
+    def test_21_range_bundle_control_state_drives_cursor_continuation(self):
+        from api import backtest_api
+
+        task_ids = ["a" * 32]
+
+        def fake_prediction_request(method, path, body=None):
+            if path.endswith("/analysis-batch"):
+                return {"prompt_bundle": {"execution_prompt": "FULL"}, "matches": [{
+                    "date": "2026-08-01", "match_no": n, "code": f"00{n}",
+                    "result_mask": {"applied": True}, "identity_check": {"result": "PASS"},
+                    "sections": [],
+                } for n in range(1, 11)]}
+            return {"id": task_ids[0], "status": "AWAITING_GPT", "blockers": []}
+
+        with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            pages = [backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-01", task_ids=task_ids, cursor=cursor
+            )) for cursor in (0, 3, 6, 9)]
+
+        self.assertEqual([page["cursor"] for page in pages], [0, 3, 6, 9])
+        self.assertEqual([page["next_cursor"] for page in pages], [3, 6, 9, None])
+        self.assertTrue(all(page["ready"] for page in pages))
+        self.assertTrue(all(page["control_state"] == "PREDICT_AND_SUBMIT" for page in pages))
+        self.assertTrue(all(page["next_operation"] == "completeReplayRange" for page in pages))
+        self.assertEqual([len(page["matches"]) for page in pages], [3, 3, 3, 1])
 
     def test_17_backtest_status_falls_back_to_persisted_replay_task(self):
         from api import backtest_api

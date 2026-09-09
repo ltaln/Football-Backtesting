@@ -76,6 +76,8 @@ class ReplayRangeCompleteRequest(ReplayRangeRequest):
 class ReplayRangeBundleResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     ready: bool
+    # Additive control marker: has_more describes pagination, not readiness.
+    control_state: str = "WAIT_FOR_DATA"
     replay_mode: bool | None = None
     task_ids: list[str] = Field(default_factory=list)
     pending_task_ids: list[str] = Field(default_factory=list)
@@ -265,6 +267,7 @@ class ReportResponse(BaseModel):
 class ReplayRangeCompleteResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
+    control_state: str = "PAGE_SAVED"
     task_ids: list[str] = Field(default_factory=list)
     saved_keys: list[int] = Field(default_factory=list)
     next_cursor: int | None = None
@@ -678,6 +681,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
     if pending and not ready_task_ids:
         return {
             "ready": False,
+            "control_state": "WAIT_FOR_DATA",
             "pending_task_ids": pending,
             "must_continue": True,
             "next_operation": "getReplayRangeBundle",
@@ -715,6 +719,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
     if request.cursor >= total_matches and pending:
         return {
             "ready": False,
+            "control_state": "WAIT_FOR_DATA",
             "pending_task_ids": pending,
             "must_continue": True,
             "next_operation": "getReplayRangeBundle",
@@ -732,6 +737,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
                      if request.cursor == 0 else None)
     return {
         "ready": True,
+        "control_state": "PREDICT_AND_SUBMIT",
         "replay_mode": True,
         "task_ids": request.task_ids,
         "cursor": request.cursor,
@@ -753,7 +759,9 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
             "Load and apply the complete prediction_prompt_bundle.execution_prompt. Execute every frozen stage and all 13 "
             "modules independently for every returned match; do not shorten, skip, merge, or copy module conclusions. On "
             "later pages continue using the complete prompt loaded at cursor 0. The compact p syntax is transport only. "
-            "Call completeReplayRange with this exact cursor and page predictions; do not reply first."
+            "control_state=PREDICT_AND_SUBMIT means this page is ready now: predict every returned match and call "
+            "completeReplayRange with this exact cursor and page predictions; do not wait or reply first. "
+            "has_more only means another page follows after submission."
         ),
     }
 
@@ -887,6 +895,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
     if page_end < len(index) or pending:
         return {
             "status": "PAGE_SAVED",
+            "control_state": "LOAD_NEXT_PAGE",
             "task_ids": request.task_ids,
             "saved_keys": sorted(page_keys),
             "next_cursor": page_end,
@@ -895,7 +904,8 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             "next_operation": "getReplayRangeBundle",
             "instruction": (
                 f"Call getReplayRangeBundle immediately with cursor={page_end}, the same command and task_ids. "
-                "Continue using the complete frozen prediction prompt loaded at cursor 0. Do not reply."
+                "control_state=LOAD_NEXT_PAGE means continue pagination; do not wait or reply. Continue using the "
+                "complete frozen prediction prompt loaded at cursor 0."
             ),
         }
 
@@ -914,6 +924,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
     task_id = report["task_id"]
     return {
         "status": "REPORT_READY",
+        "control_state": "REPORT_READY",
         "task_ids": request.task_ids,
         "saved_keys": sorted(page_keys),
         "has_more": False,
