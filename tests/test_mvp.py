@@ -279,7 +279,7 @@ class MVPTests(unittest.TestCase):
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
         complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]
-        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 3)
+        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 6)
         report_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeReportPageResponse"]
         self.assertIn("must_continue", report_schema["required"])
 
@@ -323,18 +323,18 @@ class MVPTests(unittest.TestCase):
                     "date": day, "match_no": n, "code": f"{day[-2:]}00{n}",
                     "result_mask": {"applied": True}, "identity_check": {"result": "PASS"},
                     "sections": [{"category": "mixed_data", "source_url": "ref", "content": "赛前证据"}],
-                } for n in (1, 2)]}
+                } for n in range(1, 6)]}
             return {"id": path.rsplit("/", 1)[-1], "status": "AWAITING_GPT", "blockers": []}
 
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             first = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=0))
             second = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
-                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=3))
-        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3])
-        self.assertEqual(first["next_cursor"], 3)
+                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=6))
+        self.assertEqual([item["k"] for item in first["matches"]], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(first["next_cursor"], 6)
         self.assertTrue(first["has_more"])
-        self.assertEqual([item["k"] for item in second["matches"]], [4])
+        self.assertEqual([item["k"] for item in second["matches"]], [7, 8, 9, 10])
         self.assertIsNone(second["prediction_prompt_bundle"])
 
         class FakeManager:
@@ -366,14 +366,65 @@ class MVPTests(unittest.TestCase):
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             pages = [backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-01", task_ids=task_ids, cursor=cursor
-            )) for cursor in (0, 3, 6, 9)]
+            )) for cursor in (0, 6)]
 
-        self.assertEqual([page["cursor"] for page in pages], [0, 3, 6, 9])
-        self.assertEqual([page["next_cursor"] for page in pages], [3, 6, 9, None])
+        self.assertEqual([page["cursor"] for page in pages], [0, 6])
+        self.assertEqual([page["next_cursor"] for page in pages], [6, None])
         self.assertTrue(all(page["ready"] for page in pages))
         self.assertTrue(all(page["control_state"] == "PREDICT_AND_SUBMIT" for page in pages))
         self.assertTrue(all(page["next_operation"] == "completeReplayRange" for page in pages))
-        self.assertEqual([len(page["matches"]) for page in pages], [3, 3, 3, 1])
+        self.assertEqual([len(page["matches"]) for page in pages], [6, 4])
+
+    def test_22_range_completion_inlines_six_match_pages_for_33_matches(self):
+        from api import backtest_api
+
+        task_ids = ["a" * 32, "b" * 32, "c" * 32]
+
+        def fake_prediction_request(method, path, body=None):
+            task_id = next((value for value in task_ids if value in path), task_ids[0])
+            if path.endswith("/analysis-batch"):
+                day = task_ids.index(task_id) + 1
+                return {"prompt_bundle": {"execution_prompt": "FULL"}, "matches": [{
+                    "date": f"2026-08-0{day}", "match_no": n, "code": f"{day:02d}{n:02d}",
+                    "result_mask": {"applied": True}, "identity_check": {"result": "PASS"},
+                    "sections": [],
+                } for n in range(1, 12)]}
+            if method == "POST" and path.endswith("/finalize-compact"):
+                return {"status": "COMPLETED", "prediction_commit": {"prediction_commit_id": "commit"}}
+            if method == "POST":
+                return {}
+            return {"id": task_id, "status": "AWAITING_GPT", "blockers": []}
+
+        command = "回测 2026-08-01 至 2026-08-03"
+        with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request), \
+                patch.object(backtest_api, "get_manager") as manager:
+            manager.return_value.run.return_value = {
+                "task_id": "BT-final", "snapshot_id": "SNAP", "date_range": "2026-08-01至2026-08-03",
+                "pollution_status": "CLEAN", "generated_time": "now", "summary": {},
+            }
+            first = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command=command, task_ids=task_ids, cursor=0))
+            responses = [first]
+            cursor = 0
+            while responses[-1].get("status") != "REPORT_READY":
+                end = min(cursor + backtest_api.RANGE_PAGE_SIZE, 33)
+                predictions = [
+                    f"{key}|PASS|P|P|P|P|P|40|{'D' * 13}"
+                    for key in range(cursor + 1, end + 1)
+                ]
+                result = backtest_api.complete_replay_range(backtest_api.ReplayRangeCompleteRequest(
+                    command=command, task_ids=task_ids, cursor=cursor, p=predictions))
+                responses.append(result)
+                if result["status"] == "REPORT_READY":
+                    break
+                self.assertEqual(result["control_state"], "PREDICT_AND_SUBMIT")
+                self.assertEqual(result["next_operation"], "completeReplayRange")
+                cursor = result["cursor"]
+
+        self.assertEqual(len(responses), 7)
+        self.assertEqual([response["cursor"] for response in responses[:-1]], [0, 6, 12, 18, 24, 30])
+        self.assertEqual(responses[0]["control_state"], "PREDICT_AND_SUBMIT")
+        self.assertEqual(responses[-1]["status"], "REPORT_READY")
 
     def test_17_backtest_status_falls_back_to_persisted_replay_task(self):
         from api import backtest_api

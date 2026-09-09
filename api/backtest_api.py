@@ -62,9 +62,9 @@ class ReplayRangeRequest(BaseModel):
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
     p: list[str] = Field(
         min_length=1,
-        max_length=3,
+        max_length=6,
         description=(
-            "One ultra-compact prediction per returned k, up to three matches in the current range page: "
+            "One ultra-compact prediction per returned k, up to six matches in the current range page: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
             "Scores use 1:0; HTFT uses H/D/A pairs; asian H-0.5/A+0.5/P; ou O2.5/U2.5/P; "
             "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D. "
@@ -268,10 +268,19 @@ class ReplayRangeCompleteResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
     control_state: str = "PAGE_SAVED"
+    ready: bool | None = None
     task_ids: list[str] = Field(default_factory=list)
+    pending_task_ids: list[str] = Field(default_factory=list)
+    replay_mode: bool | None = None
+    cursor: int | None = None
     saved_keys: list[int] = Field(default_factory=list)
     next_cursor: int | None = None
     has_more: bool = False
+    total_matches: int = 0
+    prediction_prompt_bundle: dict | None = None
+    matches: list[dict] = Field(default_factory=list)
+    required_module_order: list[str] = Field(default_factory=list)
+    output_format: str | None = None
     must_continue: bool
     next_operation: str
     instruction: str
@@ -649,8 +658,47 @@ def _ready_range_prefix(task_ids: list[str], statuses: list[dict]) -> tuple[list
 
 # Keep each model-facing action comfortably below tool/context limits while
 # preserving the per-match frozen analysis and the server's 3-item persistence.
-RANGE_PAGE_SIZE = 3
+RANGE_PAGE_SIZE = 6
 REPORT_PAGE_CHARS = 20000
+
+RANGE_OUTPUT_FORMAT = (
+    "Return every k exactly once in p using: "
+    "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|module_codes. "
+    "H/D/A mean home/draw/away; P means PASS. q is the evidence ceiling: copy every q=D as D; "
+    "a q=C may still be D after analysis. Never copy a fixed all-C template."
+)
+
+
+def _compact_range_match(key: int, item: dict) -> dict:
+    evidence = []
+    for section in item.get("sections", []):
+        category = section.get("category", "data")
+        compact = _compact_section(category, section.get("content", ""))
+        if compact:
+            evidence.append(f"{category}:{compact}")
+    result_mask = item.get("result_mask") or {}
+    return {
+        "k": key,
+        "d": item.get("date"),
+        "n": item.get("match_no"),
+        "c": item.get("code"),
+        "t": item.get("kickoff_at_raw"),
+        "i": _excerpt(item.get("identity_check", {}), 100),
+        "e": evidence,
+        "q": _evidence_audit(item)[0],
+        "mask": bool(result_mask.get("applied")) if isinstance(result_mask, dict) else bool(result_mask),
+    }
+
+
+def _range_page_instruction() -> str:
+    return (
+        "Load and apply the complete prediction_prompt_bundle.execution_prompt. Execute every frozen stage and all 13 "
+        "modules independently for every returned match; do not shorten, skip, merge, or copy module conclusions. On "
+        "later pages continue using the complete prompt loaded at cursor 0. The compact p syntax is transport only. "
+        "control_state=PREDICT_AND_SUBMIT means this page is ready now: predict every returned match and call "
+        "completeReplayRange with this exact cursor and page predictions; do not wait or reply first. "
+        "has_more only means another page follows after submission."
+    )
 
 
 @app.post(
@@ -696,24 +744,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
     key = 1
     for task_id, batch in zip(ready_task_ids, batches):
         for item in batch.get("matches", []):
-            evidence = []
-            for section in item.get("sections", []):
-                category = section.get("category", "data")
-                compact = _compact_section(category, section.get("content", ""))
-                if compact:
-                    evidence.append(f"{category}:{compact}")
-            result_mask = item.get("result_mask") or {}
-            matches.append({
-                "k": key,
-                "d": item.get("date"),
-                "n": item.get("match_no"),
-                "c": item.get("code"),
-                "t": item.get("kickoff_at_raw"),
-                "i": _excerpt(item.get("identity_check", {}), 100),
-                "e": evidence,
-                "q": _evidence_audit(item)[0],
-                "mask": bool(result_mask.get("applied")) if isinstance(result_mask, dict) else bool(result_mask),
-            })
+            matches.append(_compact_range_match(key, item))
             key += 1
     total_matches = len(matches)
     if request.cursor >= total_matches and pending:
@@ -748,21 +779,9 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         "must_continue": True,
         "required_module_order": MODULE_IDS,
         "matches": page_matches,
-        "output_format": (
-            "Return every k exactly once in p using: "
-            "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|module_codes. "
-            "H/D/A mean home/draw/away; P means PASS. q is the evidence ceiling: copy every q=D as D; "
-            "a q=C may still be D after analysis. Never copy a fixed all-C template."
-        ),
+        "output_format": RANGE_OUTPUT_FORMAT,
         "next_operation": "completeReplayRange",
-        "instruction": (
-            "Load and apply the complete prediction_prompt_bundle.execution_prompt. Execute every frozen stage and all 13 "
-            "modules independently for every returned match; do not shorten, skip, merge, or copy module conclusions. On "
-            "later pages continue using the complete prompt loaded at cursor 0. The compact p syntax is transport only. "
-            "control_state=PREDICT_AND_SUBMIT means this page is ready now: predict every returned match and call "
-            "completeReplayRange with this exact cursor and page predictions; do not wait or reply first. "
-            "has_more only means another page follows after submission."
-        ),
+        "instruction": _range_page_instruction(),
     }
 
 
@@ -893,6 +912,31 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             })
 
     if page_end < len(index) or pending:
+        if page_end < len(index):
+            next_page_end = min(page_end + RANGE_PAGE_SIZE, len(index))
+            next_has_more = next_page_end < len(index) or bool(pending)
+            return {
+                "status": "PAGE_SAVED",
+                "control_state": "PREDICT_AND_SUBMIT",
+                "ready": True,
+                "replay_mode": True,
+                "task_ids": request.task_ids,
+                "pending_task_ids": pending,
+                "cursor": page_end,
+                "saved_keys": sorted(page_keys),
+                "next_cursor": next_page_end if next_has_more else None,
+                "has_more": next_has_more,
+                "total_matches": len(index),
+                "matches": [
+                    _compact_range_match(key, item)
+                    for key, (_, item) in enumerate(index[page_end:next_page_end], page_end + 1)
+                ],
+                "required_module_order": MODULE_IDS,
+                "output_format": RANGE_OUTPUT_FORMAT,
+                "must_continue": True,
+                "next_operation": "completeReplayRange",
+                "instruction": _range_page_instruction(),
+            }
         return {
             "status": "PAGE_SAVED",
             "control_state": "LOAD_NEXT_PAGE",
