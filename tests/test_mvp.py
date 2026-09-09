@@ -1,7 +1,10 @@
 import tempfile
 import unittest
+import os
 from copy import deepcopy
 from datetime import date
+from io import BytesIO
+from urllib.error import HTTPError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -200,6 +203,42 @@ class MVPTests(unittest.TestCase):
             "http_status": 503,
             "error": "RESULT_MASK_FAILED",
         }])
+
+    def test_11_prediction_gateway_retries_transient_and_invalid_json(self):
+        from api import backtest_api
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *_):
+                return False
+            def read(self):
+                return self.payload
+
+        transient = HTTPError("http://gateway", 503, "busy", {}, BytesIO(b'{"detail":"busy"}'))
+        with patch.dict(os.environ, {"HH520_PREDICTION_TOKEN": "test"}), \
+                patch.object(backtest_api, "urlopen", side_effect=[transient, Response(b""), Response(b'{"ok":1}')]) as request, \
+                patch.object(backtest_api.time, "sleep") as sleeper:
+            result = backtest_api._prediction_request("GET", "/v1/tasks/x")
+        self.assertEqual(result, {"ok": 1})
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(sleeper.call_count, 2)
+
+    def test_12_prediction_gateway_does_not_retry_non_transient_4xx(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        error = HTTPError("http://gateway", 404, "missing", {}, BytesIO(b'{"detail":"TASK_NOT_FOUND"}'))
+        with patch.dict(os.environ, {"HH520_PREDICTION_TOKEN": "test"}), \
+                patch.object(backtest_api, "urlopen", side_effect=error) as request, \
+                patch.object(backtest_api.time, "sleep") as sleeper, self.assertRaises(HTTPException) as raised:
+            backtest_api._prediction_request("GET", "/v1/tasks/missing")
+        self.assertEqual(request.call_count, 1)
+        sleeper.assert_not_called()
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(raised.exception.detail, "TASK_NOT_FOUND")
 
     def test_11_replay_status_waits_until_awaiting_gpt(self):
         from api import backtest_api
@@ -426,6 +465,85 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(responses[0]["control_state"], "PREDICT_AND_SUBMIT")
         self.assertEqual(responses[-1]["status"], "REPORT_READY")
 
+    def test_23_replay_resume_is_idempotent_but_different_command_supersedes(self):
+        from api import backtest_api
+        from database.db import Database
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = Database(Path(temporary.name) / "db.sqlite3")
+        old_ids = ["a" * 32, "b" * 32, "c" * 32]
+        database.activate_replay_run("range-old", "parent-old", "回测 2026-07-16 至 2026-07-18", old_ids)
+
+        class Manager:
+            db = database
+
+        calls = []
+        def fake_prediction_request(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                task_id = path.rsplit("/", 1)[-1]
+                return {"id": task_id, "status": "AWAITING_GPT", "blockers": []}
+            if path.endswith("/cancel"):
+                return {"status": "CANCELLED"}
+            replay_date = body["command"].split()[1]
+            return {"task_id": f"new-{replay_date}", "status_url": "status", "report_url": "report",
+                    "created": True, "must_continue": True, "next_operation": "getReplayTask",
+                    "instruction": "continue", "prompt_bundle": None}
+
+        with patch.object(backtest_api, "get_manager", return_value=Manager()), \
+                patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            resumed = backtest_api.create_replay_task(backtest_api.ReplayTaskRequest(
+                request_id="new-parent", command="回测 2026-07-16 至 2026-07-18"))
+            created = backtest_api.create_replay_task(backtest_api.ReplayTaskRequest(
+                request_id="different-parent", command="回测 2026-07-19 至 2026-07-21"))
+
+        self.assertEqual(resumed["execution_status"], "RESUMED")
+        self.assertEqual([item["task_id"] for item in resumed["tasks"]], old_ids)
+        self.assertFalse(any(method == "POST" and path == "/v1/tasks" for method, path, _ in calls[:3]))
+        self.assertEqual(created["execution_status"], "CREATED")
+        self.assertEqual(len([call for call in calls if call[0] == "POST" and call[1] == "/v1/tasks"]), 3)
+        self.assertIsNone(database.get_active_replay_run("回测 2026-07-16 至 2026-07-18"))
+        self.assertEqual(database.get_active_replay_run("回测 2026-07-19 至 2026-07-21")["task_ids"], [
+            "new-2026-07-19", "new-2026-07-20", "new-2026-07-21",
+        ])
+
+    def test_24_stale_replay_cancels_remote_tasks_before_replacement(self):
+        from api import backtest_api
+        from database.db import Database
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = Database(Path(temporary.name) / "db.sqlite3")
+        stale_ids = ["d" * 32, "e" * 32, "f" * 32]
+        command = "回测 2026-07-16 至 2026-07-18"
+        database.activate_replay_run("range-stale", "parent-stale", command, stale_ids)
+
+        class Manager:
+            db = database
+
+        calls = []
+        def fake_prediction_request(method, path, body=None):
+            calls.append((method, path))
+            if method == "GET":
+                return {"status": "FAILED"}
+            if path.endswith("/cancel"):
+                return {"status": "CANCELLED"}
+            replay_date = body["command"].split()[1]
+            return {"task_id": f"fresh-{replay_date}", "status_url": "status", "report_url": "report",
+                    "created": True, "prompt_bundle": None}
+
+        with patch.object(backtest_api, "get_manager", return_value=Manager()), \
+                patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            response = backtest_api.create_replay_task(backtest_api.ReplayTaskRequest(
+                request_id="fresh-parent", command=command))
+
+        self.assertEqual(response["execution_status"], "CREATED")
+        self.assertEqual([path for method, path in calls if method == "POST" and path.endswith("/cancel")], [
+            f"/v1/tasks/{task_id}/cancel" for task_id in stale_ids
+        ])
+        self.assertIsNotNone(database.get_active_replay_run(command))
+
     def test_17_backtest_status_falls_back_to_persisted_replay_task(self):
         from api import backtest_api
 
@@ -454,6 +572,9 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(database.activate_replay_run("range-2", "request-2", "second", ["c"]), [])
         database.complete_replay_run(["c"])
         self.assertEqual(database.activate_replay_run("range-3", "request-3", "third", ["d"]), [])
+        with database.session() as connection:
+            self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+            self.assertGreaterEqual(connection.execute("PRAGMA busy_timeout").fetchone()[0], 15000)
 
     def test_19_partial_range_task_fails_with_real_blocker(self):
         from fastapi import HTTPException

@@ -8,14 +8,18 @@ from database.models import BacktestTask, EvaluationRecord
 
 
 class Database:
+    SQLITE_TIMEOUT_SECONDS = 15
+    SQLITE_BUSY_TIMEOUT_MS = 15000
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=self.SQLITE_TIMEOUT_SECONDS)
         connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout={self.SQLITE_BUSY_TIMEOUT_MS}")
         return connection
 
     @contextmanager
@@ -29,6 +33,7 @@ class Database:
 
     def initialize(self) -> None:
         with self.session() as db:
+            db.execute("PRAGMA journal_mode=WAL")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS backtest_tasks (
                     task_id TEXT PRIMARY KEY, start_date TEXT NOT NULL, end_date TEXT NOT NULL,
@@ -69,6 +74,28 @@ class Database:
                  json.dumps(task_ids, separators=(",", ":")), time.time()),
             )
         return previous
+
+    def get_active_replay_run(self, command: str) -> dict | None:
+        """Return the exact active group for a normalized replay command."""
+        with self.session() as db:
+            row = db.execute(
+                "SELECT range_run_id, parent_request_id, command, task_ids_json "
+                "FROM replay_range_runs WHERE status='ACTIVE' AND command=? "
+                "ORDER BY created_time DESC LIMIT 1",
+                (command,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["task_ids"] = json.loads(result.pop("task_ids_json"))
+        return result
+
+    def retire_replay_run(self, range_run_id: str, status: str = "STALE") -> None:
+        with self.session() as db:
+            db.execute(
+                "UPDATE replay_range_runs SET status=? WHERE range_run_id=? AND status='ACTIVE'",
+                (status, range_run_id),
+            )
 
     def complete_replay_run(self, task_ids: list[str]) -> None:
         encoded = json.dumps(task_ids, separators=(",", ":"))

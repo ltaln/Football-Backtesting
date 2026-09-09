@@ -361,18 +361,33 @@ def _prediction_request(method: str, path: str, body: dict | None = None) -> dic
     headers = {"Authorization": f"Bearer {token}"}
     if data is not None:
         headers["Content-Type"] = "application/json"
-    try:
-        with urlopen(Request(base + path, data=data, headers=headers, method=method), timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
+    retryable_statuses = {429, 500, 502, 503, 504}
+    retry_delays = (0.25, 0.5, 0.75)
+    for attempt in range(len(retry_delays) + 1):
         try:
-            payload = json.loads(exc.read().decode("utf-8"))
-            detail = payload.get("error") or payload.get("detail") or "REPLAY_GATEWAY_ERROR"
-        except Exception:
-            detail = "REPLAY_GATEWAY_ERROR"
-        raise HTTPException(status_code=exc.code, detail=detail) from exc
-    except (URLError, TimeoutError) as exc:
-        raise HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE") from exc
+            with urlopen(Request(base + path, data=data, headers=headers, method=method), timeout=5) as response:
+                raw = response.read()
+                if not raw or not raw.strip():
+                    raise ValueError("empty response")
+                payload = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+                if not isinstance(payload, dict) or not payload:
+                    raise ValueError("invalid response")
+                return payload
+        except HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8"))
+                detail = payload.get("error") or payload.get("detail") or "REPLAY_GATEWAY_ERROR"
+            except Exception:
+                detail = "REPLAY_GATEWAY_ERROR"
+            if exc.code not in retryable_statuses or attempt == len(retry_delays):
+                raise HTTPException(status_code=exc.code, detail=detail) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            if attempt == len(retry_delays):
+                raise HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE") from exc
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if attempt == len(retry_delays):
+                raise HTTPException(status_code=502, detail="REPLAY_GATEWAY_INVALID_JSON") from exc
+        time.sleep(retry_delays[attempt])
 
 
 def _decorate_replay_create(response: dict) -> dict:
@@ -388,6 +403,76 @@ def _decorate_replay_create(response: dict) -> dict:
 def _child_request_id(parent_request_id: str, replay_date: str) -> str:
     digest = sha256(f"{parent_request_id}:{replay_date}".encode("utf-8")).hexdigest()[:32]
     return f"replay-{digest}"
+
+
+def _normalized_replay_command(command) -> str:
+    start = command.start_date.isoformat()
+    end = command.end_date.isoformat()
+    return f"回测 {start} 全部比赛" if start == end else f"回测 {start} 至 {end}"
+
+
+def _resume_active_replay(existing: dict, command) -> dict:
+    task_ids = existing["task_ids"]
+    tasks = []
+    for offset, task_id in enumerate(task_ids):
+        replay_date = (command.start_date + timedelta(days=offset)).isoformat()
+        child_command = f"回测 {replay_date} 全部比赛"
+        tasks.append({
+            "date": replay_date, "request_id": _child_request_id(existing["parent_request_id"], replay_date),
+            "command": child_command, "task_id": task_id,
+            "status_url": f"/v1/tasks/{task_id}", "report_url": f"/v1/tasks/{task_id}/report",
+            "created": False, "must_continue": True, "next_operation": "getReplayRangeBundle",
+            "instruction": "Use this task_id in the single range bundle call; do not poll it separately.",
+            "prediction_prompt_bundle": None, "insight_prompt_binding": prompt_binding(_insight_prompt),
+        })
+    response = {
+        "created": True, "must_continue": True, "next_operation": "getReplayRangeBundle",
+        "prompt_bundle": None, "execution_status": "RESUMED",
+        "range_run_id": existing["range_run_id"], "parent_request_id": existing["parent_request_id"],
+        "start_date": command.start_date.isoformat(), "end_date": command.end_date.isoformat(),
+        "day_count": len(task_ids), "created_count": len(task_ids), "failed_count": 0,
+        "tasks": tasks, "errors": [], "cancelled_previous_task_ids": [],
+    }
+    if len(tasks) == 1:
+        response["task_id"] = tasks[0]["task_id"]
+        response["status_url"] = tasks[0]["status_url"]
+        response["report_url"] = tasks[0]["report_url"]
+    return _decorate_replay_create(response)
+
+
+def _find_resumable_replay(command) -> dict | None:
+    normalized = _normalized_replay_command(command)
+    existing = get_manager().db.get_active_replay_run(normalized)
+    expected = (command.end_date - command.start_date).days + 1
+    if not existing:
+        return None
+    task_ids = existing.get("task_ids", [])
+    stale = len(task_ids) != expected
+    if not stale:
+        healthy_statuses = {
+            "CREATED", "CHECKING_DATA", "STARTUP_CHECK", "COLLECTING", "SANITIZING",
+            "SNAPSHOT_READY", "RUNNING", "EVALUATING", "AWAITING_GPT", "COMPLETED", "REPORT_READY",
+        }
+        for task_id in task_ids:
+            try:
+                status = _prediction_request("GET", f"/v1/tasks/{task_id}")
+            except HTTPException as exc:
+                if exc.status_code in {400, 404, 410}:
+                    stale = True
+                    break
+                raise
+            if status.get("status") not in healthy_statuses:
+                stale = True
+                break
+    if stale:
+        for task_id in task_ids:
+            try:
+                _prediction_request("POST", f"/v1/tasks/{task_id}/cancel", {})
+            except HTTPException:
+                pass
+        get_manager().db.retire_replay_run(existing["range_run_id"])
+        return None
+    return existing
 
 
 def _activate_latest_replay(parent_request_id: str, command: str,
@@ -416,10 +501,14 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         raise HTTPException(status_code=422, detail=exc.code) from exc
 
     day_count = (command.end_date - command.start_date).days + 1
+    resumable = _find_resumable_replay(command)
+    if resumable:
+        return _resume_active_replay(resumable, command)
+    normalized_command = _normalized_replay_command(command)
     if day_count == 1:
         response = _decorate_replay_create(_prediction_request("POST", "/v1/tasks", request.model_dump()))
         range_run_id, cancelled = _activate_latest_replay(
-            request.request_id, request.command, [response["task_id"]]
+            request.request_id, normalized_command, [response["task_id"]]
         )
         response["range_run_id"] = range_run_id
         response["cancelled_previous_task_ids"] = cancelled
@@ -470,7 +559,7 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
     range_run_id, cancelled = (None, [])
     if created_count == day_count:
         range_run_id, cancelled = _activate_latest_replay(
-            request.request_id, request.command, [task["task_id"] for task in tasks]
+            request.request_id, normalized_command, [task["task_id"] for task in tasks]
         )
     execution_status = "CREATED" if failed_count == 0 else ("PARTIAL" if created_count else "FAILED")
     return {
