@@ -407,6 +407,20 @@ def _is_transient_gateway_error(exc: HTTPException) -> bool:
     )
 
 
+RANGE_GATEWAY_RETRY_DELAYS = (2, 4, 6, 8)
+
+
+def _range_gateway_call(callback):
+    """Absorb a short gateway outage inside one Action invocation."""
+    for delay in (*RANGE_GATEWAY_RETRY_DELAYS, None):
+        try:
+            return callback()
+        except HTTPException as exc:
+            if not _is_transient_gateway_error(exc) or delay is None:
+                raise
+            time.sleep(delay)
+
+
 def _range_retry_response(request: ReplayRangeRequest, operation: str, detail: object) -> dict:
     if request.retry_attempt >= 4:
         raise HTTPException(status_code=503, detail={
@@ -1001,7 +1015,11 @@ def _finish_range_report(request: ReplayRangeRequest, statuses: list[dict],
     for task_id, current in zip(request.task_ids, statuses):
         status = current
         if status.get("status") != "COMPLETED" or not status.get("prediction_commit"):
-            status = _prediction_request("POST", f"/v1/tasks/{task_id}/finalize-compact", {})
+            status = _range_gateway_call(
+                lambda task_id=task_id: _prediction_request(
+                    "POST", f"/v1/tasks/{task_id}/finalize-compact", {}
+                )
+            )
         commit = status.get("prediction_commit") or {}
         if not commit.get("prediction_commit_id"):
             raise HTTPException(status_code=409, detail=f"RANGE_COMMIT_MISSING:{task_id}")
@@ -1043,7 +1061,10 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
     deadline = time.monotonic() + 24
     while True:
         try:
-            statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+            statuses = _range_gateway_call(
+                lambda: [_prediction_request("GET", f"/v1/tasks/{task_id}")
+                         for task_id in request.task_ids]
+            )
         except HTTPException as exc:
             if _is_transient_gateway_error(exc):
                 return _range_retry_response(request, "getReplayRangeBundle", exc.detail)
@@ -1075,7 +1096,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         }
 
     try:
-        batches = _range_batches(ready_task_ids)
+        batches = _range_gateway_call(lambda: _range_batches(ready_task_ids))
     except HTTPException as exc:
         if _is_transient_gateway_error(exc):
             return _range_retry_response(request, "getReplayRangeBundle", exc.detail)
@@ -1197,7 +1218,10 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
     """Persist one small page, then close the range only after every page is saved."""
     _range_task_ids(request)
     try:
-        statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+        statuses = _range_gateway_call(
+            lambda: [_prediction_request("GET", f"/v1/tasks/{task_id}")
+                     for task_id in request.task_ids]
+        )
     except HTTPException as exc:
         if _is_transient_gateway_error(exc):
             return _range_retry_response(request, "completeReplayRange", exc.detail)
@@ -1213,7 +1237,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
         })
     ready_task_ids, pending = _ready_range_prefix(request.task_ids, statuses)
     try:
-        batches = _range_batches(ready_task_ids)
+        batches = _range_gateway_call(lambda: _range_batches(ready_task_ids))
     except HTTPException as exc:
         if _is_transient_gateway_error(exc):
             return _range_retry_response(request, "completeReplayRange", exc.detail)
@@ -1260,14 +1284,25 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
     for task_id, predictions in grouped.items():
         if not predictions:
             continue
-        status = _prediction_request("GET", f"/v1/tasks/{task_id}")
+        try:
+            status = _range_gateway_call(
+                lambda task_id=task_id: _prediction_request("GET", f"/v1/tasks/{task_id}")
+            )
+        except HTTPException as exc:
+            if _is_transient_gateway_error(exc):
+                return _range_retry_response(request, "completeReplayRange", exc.detail)
+            raise
         if status.get("status") == "COMPLETED" and status.get("prediction_commit"):
             continue
         for offset in range(0, len(predictions), 3):
             try:
-                _prediction_request("POST", f"/v1/tasks/{task_id}/analysis-min", {
-                    "p": predictions[offset:offset + 3],
-                })
+                _range_gateway_call(
+                    lambda task_id=task_id, offset=offset, predictions=predictions: _prediction_request(
+                        "POST", f"/v1/tasks/{task_id}/analysis-min", {
+                            "p": predictions[offset:offset + 3],
+                        }
+                    )
+                )
             except HTTPException as exc:
                 if _is_transient_gateway_error(exc):
                     return _range_retry_response(request, "completeReplayRange", exc.detail)
@@ -1316,7 +1351,10 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
         }
 
     try:
-        refreshed = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+        refreshed = _range_gateway_call(
+            lambda: [_prediction_request("GET", f"/v1/tasks/{task_id}")
+                     for task_id in request.task_ids]
+        )
         return _finish_range_report(request, refreshed, sorted(page_keys), len(index))
     except HTTPException as exc:
         if _is_transient_gateway_error(exc):

@@ -673,7 +673,8 @@ class MVPTests(unittest.TestCase):
         task_ids = ["a" * 32]
         command = "回测 2026-08-01"
         failure = HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE")
-        with patch.object(backtest_api, "_prediction_request", side_effect=failure):
+        with patch.object(backtest_api, "_prediction_request", side_effect=failure), \
+                patch.object(backtest_api, "RANGE_GATEWAY_RETRY_DELAYS", (0,)):
             bundle = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command=command, task_ids=task_ids, cursor=3))
             complete = backtest_api.complete_replay_range(backtest_api.ReplayRangeCompleteRequest(
@@ -738,11 +739,31 @@ class MVPTests(unittest.TestCase):
 
         failure = HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE")
         with patch.object(backtest_api, "_prediction_request", side_effect=failure), \
+                patch.object(backtest_api, "RANGE_GATEWAY_RETRY_DELAYS", (0,)), \
                 self.assertRaises(HTTPException) as raised:
             backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-06", task_ids=["a" * 32], retry_attempt=4))
         self.assertEqual(raised.exception.detail["error"], "REPLAY_GATEWAY_RETRY_EXHAUSTED")
         self.assertEqual(raised.exception.detail["stage"], "getReplayRangeBundle")
+
+    def test_33_range_gateway_outage_is_recovered_inside_same_action(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        attempts = 0
+
+        def flaky_call():
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE")
+            return {"status": "AWAITING_GPT"}
+
+        with patch.object(backtest_api, "RANGE_GATEWAY_RETRY_DELAYS", (0, 0)):
+            result = backtest_api._range_gateway_call(flaky_call)
+
+        self.assertEqual(result["status"], "AWAITING_GPT")
+        self.assertEqual(attempts, 3)
 
     def test_30_date_only_resume_recovers_first_unsaved_cursor(self):
         from api import backtest_api
