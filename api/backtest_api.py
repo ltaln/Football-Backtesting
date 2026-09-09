@@ -91,6 +91,9 @@ class ReplayRangeBundleResponse(BaseModel):
     matches: list[dict] = Field(default_factory=list)
     output_format: str | None = None
     must_continue: bool
+    continuation_required: bool = True
+    terminal: bool = False
+    user_response_allowed: bool = False
     next_operation: str
     instruction: str
 
@@ -285,6 +288,9 @@ class ReplayRangeCompleteResponse(BaseModel):
     required_module_order: list[str] = Field(default_factory=list)
     output_format: str | None = None
     must_continue: bool
+    continuation_required: bool = True
+    terminal: bool = False
+    user_response_allowed: bool = False
     next_operation: str
     instruction: str
     task_id: str | None = None
@@ -307,6 +313,9 @@ class ReplayRangeReportPageResponse(BaseModel):
     has_more: bool
     content: str
     must_continue: bool
+    continuation_required: bool
+    terminal: bool
+    user_response_allowed: bool
     next_operation: str
     instruction: str
 
@@ -1043,7 +1052,8 @@ def _finish_range_report(request: ReplayRangeRequest, statuses: list[dict],
         "status": "REPORT_READY", "control_state": "REPORT_READY", "ready": True,
         "task_ids": request.task_ids, "cursor": total_matches, "saved_keys": saved_keys,
         "has_more": False, "total_matches": total_matches,
-        "must_continue": False, "next_operation": "final_response",
+        "must_continue": False, "continuation_required": False,
+        "terminal": True, "user_response_allowed": True, "next_operation": "final_response",
         "instruction": (
             "The full range is complete. Apply the complete prompt_bundle.content to report_digest and output the "
             "detailed Chinese final report now, including every match, all 13 modules, A-E causes and recommendations. "
@@ -1155,6 +1165,9 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
         "total_matches": total_matches,
         "prediction_prompt_bundle": prompt_bundle,
         "must_continue": True,
+        "continuation_required": True,
+        "terminal": False,
+        "user_response_allowed": False,
         "required_module_order": MODULE_IDS,
         "matches": page_matches,
         "output_format": RANGE_OUTPUT_FORMAT,
@@ -1324,7 +1337,7 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             next_page_end = min(page_end + RANGE_PAGE_SIZE, len(index))
             next_has_more = next_page_end < len(index) or bool(pending)
             return {
-                "status": "PAGE_SAVED",
+                "status": "CONTINUE_REQUIRED",
                 "control_state": "PREDICT_AND_SUBMIT",
                 "ready": True,
                 "replay_mode": True,
@@ -1342,17 +1355,23 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
                 "required_module_order": MODULE_IDS,
                 "output_format": RANGE_OUTPUT_FORMAT,
                 "must_continue": True,
+                "continuation_required": True,
+                "terminal": False,
+                "user_response_allowed": False,
                 "next_operation": "completeReplayRange",
                 "instruction": _range_page_instruction(),
             }
         return {
-            "status": "PAGE_SAVED",
+            "status": "CONTINUE_REQUIRED",
             "control_state": "LOAD_NEXT_PAGE",
             "task_ids": request.task_ids,
             "saved_keys": sorted(page_keys),
             "next_cursor": page_end,
             "has_more": True,
             "must_continue": True,
+            "continuation_required": True,
+            "terminal": False,
+            "user_response_allowed": False,
             "next_operation": "getReplayRangeBundle",
             "instruction": (
                 f"Call getReplayRangeBundle immediately with cursor={page_end}, the same command and task_ids. "
@@ -1401,6 +1420,9 @@ def get_replay_range_report_page(task_id: str, cursor: int = 0,
         "has_more": has_more,
         "content": markdown[cursor:end],
         "must_continue": has_more,
+        "continuation_required": has_more,
+        "terminal": not has_more,
+        "user_response_allowed": not has_more,
         "next_operation": "getReplayRangeReportPage" if has_more else "final_response",
         "instruction": (
             f"Call getReplayRangeReportPage immediately with cursor={end}; do not reply yet."

@@ -463,14 +463,21 @@ class MVPTests(unittest.TestCase):
                 responses.append(result)
                 if result["status"] == "REPORT_READY":
                     break
+                self.assertEqual(result["status"], "CONTINUE_REQUIRED")
                 self.assertEqual(result["control_state"], "PREDICT_AND_SUBMIT")
                 self.assertEqual(result["next_operation"], "completeReplayRange")
+                self.assertTrue(result["continuation_required"])
+                self.assertFalse(result["terminal"])
+                self.assertFalse(result["user_response_allowed"])
                 cursor = result["cursor"]
 
         self.assertEqual(len(responses), 4)
         self.assertEqual([response["cursor"] for response in responses[:-1]], [0, 12, 24])
         self.assertEqual(responses[0]["control_state"], "PREDICT_AND_SUBMIT")
         self.assertEqual(responses[-1]["status"], "REPORT_READY")
+        self.assertFalse(responses[-1]["continuation_required"])
+        self.assertTrue(responses[-1]["terminal"])
+        self.assertTrue(responses[-1]["user_response_allowed"])
 
     def test_23_replay_resume_is_idempotent_but_different_command_supersedes(self):
         from api import backtest_api
