@@ -51,12 +51,14 @@ class RunRequest(BaseModel):
 class ReplayTaskRequest(BaseModel):
     request_id: str
     command: str
+    retry_attempt: int = Field(default=0, ge=0, le=4)
 
 
 class ReplayRangeRequest(BaseModel):
     command: str
     task_ids: list[str] = Field(min_length=1, max_length=3)
     cursor: int = Field(default=0, ge=0)
+    retry_attempt: int = Field(default=0, ge=0, le=4)
 
 
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
@@ -138,6 +140,7 @@ class ReplayCreateResponse(BaseModel):
     tasks: list[ReplayCreatedTask] | None = None
     errors: list[ReplayCreationError] | None = None
     cancelled_previous_task_ids: list[str] = Field(default_factory=list)
+    retry_attempt: int = 0
 
 
 class ReplayStatusResponse(BaseModel):
@@ -390,6 +393,53 @@ def _prediction_request(method: str, path: str, body: dict | None = None) -> dic
         time.sleep(retry_delays[attempt])
 
 
+def _is_transient_gateway_error(exc: HTTPException) -> bool:
+    detail = str(exc.detail)
+    transport_errors = {
+        "REPLAY_GATEWAY_UNAVAILABLE", "REPLAY_GATEWAY_INVALID_JSON", "REPLAY_GATEWAY_ERROR",
+    }
+    return (
+        detail in transport_errors
+        or exc.status_code in {429, 502, 504}
+        or (exc.status_code in {500, 503}
+            and any(marker in detail.lower() for marker in ("busy", "temporary", "timeout")))
+    )
+
+
+def _range_retry_response(request: ReplayRangeRequest, operation: str, detail: object) -> dict:
+    if request.retry_attempt >= 4:
+        raise HTTPException(status_code=503, detail={
+            "error": "REPLAY_GATEWAY_RETRY_EXHAUSTED",
+            "stage": operation,
+            "cursor": request.cursor,
+            "task_ids": request.task_ids,
+            "last_error": str(detail),
+        })
+    control_state = "RETRY_RANGE_BUNDLE" if operation == "getReplayRangeBundle" else "RETRY_RANGE_COMPLETE"
+    response = {
+        "ready": False,
+        "control_state": control_state,
+        "replay_mode": True,
+        "task_ids": request.task_ids,
+        "pending_task_ids": [],
+        "cursor": request.cursor,
+        "next_cursor": request.cursor,
+        "retry_attempt": request.retry_attempt + 1,
+        "has_more": False,
+        "must_continue": True,
+        "next_operation": operation,
+        "instruction": (
+            f"Temporary gateway failure ({detail}). Call {operation} again immediately with the exact same command, "
+            f"task_ids, cursor={request.cursor}, retry_attempt={request.retry_attempt + 1}"
+            + (" and the same page predictions." if operation == "completeReplayRange" else ".")
+            + " Do not reply to the user or change the cursor."
+        ),
+    }
+    if operation == "completeReplayRange":
+        response["status"] = "RETRY_REQUIRED"
+    return response
+
+
 def _decorate_replay_create(response: dict) -> dict:
     response["prediction_prompt_bundle"] = response.pop("prompt_bundle", None)
     response["insight_prompt_binding"] = prompt_binding(_insight_prompt)
@@ -506,9 +556,41 @@ def _activate_latest_replay(parent_request_id: str, command: str,
     previous = get_manager().db.activate_replay_run(range_run_id, parent_request_id, command, task_ids)
     cancelled = []
     for task_id in previous:
-        _prediction_request("POST", f"/v1/tasks/{task_id}/cancel", {})
-        cancelled.append(task_id)
+        try:
+            _prediction_request("POST", f"/v1/tasks/{task_id}/cancel", {})
+            cancelled.append(task_id)
+        except HTTPException:
+            # The DB ownership switch is authoritative. A temporary cleanup
+            # failure must not prevent the new range from running.
+            pass
     return range_run_id, cancelled
+
+
+def _creation_retry_response(request: ReplayTaskRequest, command, exc: HTTPException) -> dict:
+    detail = exc.detail
+    if request.retry_attempt >= 4:
+        raise HTTPException(status_code=503, detail={
+            "error": "REPLAY_GATEWAY_RETRY_EXHAUSTED", "stage": "createReplayTask",
+            "request_id": request.request_id, "last_error": str(detail),
+        })
+    return {
+        "created": False, "must_continue": True, "next_operation": "createReplayTask",
+        "instruction": (
+            "Temporary gateway failure. Call createReplayTask again immediately with the exact same "
+            f"request_id={request.request_id}, command and retry_attempt={request.retry_attempt + 1}; "
+            "do not reply to the user."
+        ),
+        "insight_prompt_binding": prompt_binding(_insight_prompt),
+        "execution_status": "RETRY_REQUIRED", "parent_request_id": request.request_id,
+        "start_date": command.start_date.isoformat(), "end_date": command.end_date.isoformat(),
+        "day_count": (command.end_date - command.start_date).days + 1,
+        "created_count": 0, "failed_count": 1, "retry_attempt": request.retry_attempt + 1,
+        "errors": [{
+            "date": command.start_date.isoformat(), "request_id": request.request_id,
+            "command": _normalized_replay_command(command), "http_status": exc.status_code,
+            "error": str(detail),
+        }],
+    }
 
 
 @app.post(
@@ -526,12 +608,24 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         raise HTTPException(status_code=422, detail=exc.code) from exc
 
     day_count = (command.end_date - command.start_date).days + 1
-    resumable = _find_resumable_replay(command)
+    normalized_command = _normalized_replay_command(command)
+    try:
+        resumable = _find_resumable_replay(command)
+    except HTTPException as exc:
+        if _is_transient_gateway_error(exc):
+            return _creation_retry_response(request, command, exc)
+        raise
     if resumable:
         return _resume_active_replay(resumable, command)
-    normalized_command = _normalized_replay_command(command)
     if day_count == 1:
-        response = _decorate_replay_create(_prediction_request("POST", "/v1/tasks", request.model_dump()))
+        try:
+            response = _decorate_replay_create(_prediction_request("POST", "/v1/tasks", {
+                "request_id": request.request_id, "command": request.command,
+            }))
+        except HTTPException as exc:
+            if not _is_transient_gateway_error(exc):
+                raise
+            return _creation_retry_response(request, command, exc)
         range_run_id, cancelled = _activate_latest_replay(
             request.request_id, normalized_command, [response["task_id"]]
         )
@@ -541,6 +635,7 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
 
     tasks: list[dict] = []
     errors: list[dict] = []
+    transient_only = True
     for offset in range(day_count):
         replay_date = (command.start_date + timedelta(days=offset)).isoformat()
         child_request_id = _child_request_id(request.request_id, replay_date)
@@ -565,6 +660,7 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
                 "insight_prompt_binding": prompt_binding(_insight_prompt),
             })
         except HTTPException as exc:
+            transient_only = transient_only and _is_transient_gateway_error(exc)
             errors.append({
                 "date": replay_date,
                 "request_id": child_request_id,
@@ -575,7 +671,12 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
 
     created_count = len(tasks)
     failed_count = len(errors)
-    if failed_count:
+    if failed_count and transient_only and request.retry_attempt >= 4:
+        raise HTTPException(status_code=503, detail={
+            "error": "REPLAY_GATEWAY_RETRY_EXHAUSTED", "stage": "createReplayTask",
+            "request_id": request.request_id, "last_errors": errors,
+        })
+    if failed_count and not transient_only:
         for task in tasks:
             try:
                 _prediction_request("POST", f"/v1/tasks/{task['task_id']}/cancel", {})
@@ -586,16 +687,28 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         range_run_id, cancelled = _activate_latest_replay(
             request.request_id, normalized_command, [task["task_id"] for task in tasks]
         )
-    execution_status = "CREATED" if failed_count == 0 else ("PARTIAL" if created_count else "FAILED")
+    execution_status = (
+        "CREATED" if failed_count == 0 else
+        "RETRY_REQUIRED" if transient_only else
+        ("PARTIAL" if created_count else "FAILED")
+    )
+    can_continue = created_count == day_count or (failed_count > 0 and transient_only)
     return {
         "created": created_count == day_count,
-        "must_continue": created_count == day_count,
-        "next_operation": "getReplayRangeBundle" if created_count == day_count else None,
+        "must_continue": can_continue,
+        "next_operation": (
+            "getReplayRangeBundle" if created_count == day_count else
+            "createReplayTask" if transient_only else None
+        ),
         "instruction": (
+            "Temporary gateway failure: call createReplayTask again immediately with the exact same request_id and "
+            f"command, using retry_attempt={request.retry_attempt + 1}; do not cancel created children and do not "
+            "reply to the user."
+            if failed_count and transient_only else
             "If errors is non-empty, stop and report each exact date, HTTP status, and error code. Otherwise call "
             "getReplayRangeBundle with the original command and every returned task_id in ascending date order. "
             "While must_continue=true, execute next_operation immediately in the same assistant turn and never reply "
-            "with a waiting or pending message. Never poll the six tasks individually and never reuse an older task or commit."
+            "with a waiting or pending message. Never poll tasks individually and never reuse an older task or commit."
         ),
         "insight_prompt_binding": prompt_binding(_insight_prompt),
         "execution_status": execution_status,
@@ -607,6 +720,7 @@ def create_replay_task(request: ReplayTaskRequest, _: None = Security(require_to
         "day_count": day_count,
         "created_count": created_count,
         "failed_count": failed_count,
+        "retry_attempt": request.retry_attempt + 1 if failed_count and transient_only else 0,
         "tasks": tasks,
         "errors": errors,
     }
@@ -759,15 +873,33 @@ def _range_batches(task_ids: list[str]) -> list[dict]:
 
 def _ready_range_prefix(task_ids: list[str], statuses: list[dict]) -> tuple[list[str], list[str]]:
     """Return the stable ready date prefix and every task still collecting."""
-    pending_states = {"CREATED", "STARTUP_CHECK", "COLLECTING"}
+    ready_states = {"AWAITING_GPT", "COMPLETED"}
     pending = [task_id for task_id, item in zip(task_ids, statuses)
-               if item.get("status") in pending_states]
+               if item.get("status") not in ready_states]
     prefix = []
     for task_id, item in zip(task_ids, statuses):
-        if item.get("status") in pending_states:
+        if item.get("status") not in ready_states:
             break
         prefix.append(task_id)
     return prefix, pending
+
+
+def _validate_range_task_dates(request: ReplayRangeRequest, statuses: list[dict]) -> None:
+    command = parse_command(request.command)
+    expected_dates = [
+        (command.start_date + timedelta(days=offset)).isoformat()
+        for offset in range((command.end_date - command.start_date).days + 1)
+    ]
+    actual_dates = [
+        (item.get("payload") or {}).get("date") if isinstance(item.get("payload"), dict) else None
+        for item in statuses
+    ]
+    if actual_dates != expected_dates:
+        raise HTTPException(status_code=409, detail={
+            "error": "RANGE_TASK_DATE_MISMATCH",
+            "expected_dates": expected_dates,
+            "actual_dates": actual_dates,
+        })
 
 
 # Keep each model-facing action comfortably below tool/context limits while
@@ -827,7 +959,13 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
     _range_task_ids(request)
     deadline = time.monotonic() + 24
     while True:
-        statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+        try:
+            statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+        except HTTPException as exc:
+            if _is_transient_gateway_error(exc):
+                return _range_retry_response(request, "getReplayRangeBundle", exc.detail)
+            raise
+        _validate_range_task_dates(request, statuses)
         failed = [item for item in statuses
                   if item.get("status") in {"FAILED", "BLOCKED", "CANCELLED", "PARTIAL"}]
         if failed:
@@ -853,7 +991,12 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
             ),
         }
 
-    batches = _range_batches(ready_task_ids)
+    try:
+        batches = _range_batches(ready_task_ids)
+    except HTTPException as exc:
+        if _is_transient_gateway_error(exc):
+            return _range_retry_response(request, "getReplayRangeBundle", exc.detail)
+        raise
     matches = []
     key = 1
     for task_id, batch in zip(ready_task_ids, batches):
@@ -964,7 +1107,13 @@ def _decode_ultra(line: str) -> tuple[int, list[str], str]:
 def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Security(require_token)) -> dict:
     """Persist one small page, then close the range only after every page is saved."""
     _range_task_ids(request)
-    statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+    try:
+        statuses = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+    except HTTPException as exc:
+        if _is_transient_gateway_error(exc):
+            return _range_retry_response(request, "completeReplayRange", exc.detail)
+        raise
+    _validate_range_task_dates(request, statuses)
     failed = [item for item in statuses
               if item.get("status") in {"FAILED", "BLOCKED", "CANCELLED", "PARTIAL"}]
     if failed:
@@ -974,7 +1123,12 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
                        "blockers": item.get("blockers", [])} for item in failed],
         })
     ready_task_ids, pending = _ready_range_prefix(request.task_ids, statuses)
-    batches = _range_batches(ready_task_ids)
+    try:
+        batches = _range_batches(ready_task_ids)
+    except HTTPException as exc:
+        if _is_transient_gateway_error(exc):
+            return _range_retry_response(request, "completeReplayRange", exc.detail)
+        raise
     index = []
     for task_id, batch in zip(ready_task_ids, batches):
         for item in batch.get("matches", []):
@@ -1021,9 +1175,14 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
         if status.get("status") == "COMPLETED" and status.get("prediction_commit"):
             continue
         for offset in range(0, len(predictions), 3):
-            _prediction_request("POST", f"/v1/tasks/{task_id}/analysis-min", {
-                "p": predictions[offset:offset + 3],
-            })
+            try:
+                _prediction_request("POST", f"/v1/tasks/{task_id}/analysis-min", {
+                    "p": predictions[offset:offset + 3],
+                })
+            except HTTPException as exc:
+                if _is_transient_gateway_error(exc):
+                    return _range_retry_response(request, "completeReplayRange", exc.detail)
+                raise
 
     if page_end < len(index) or pending:
         if page_end < len(index):
@@ -1069,9 +1228,14 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
 
     commits = []
     for task_id in request.task_ids:
-        status = _prediction_request("GET", f"/v1/tasks/{task_id}")
-        if status.get("status") != "COMPLETED" or not status.get("prediction_commit"):
-            status = _prediction_request("POST", f"/v1/tasks/{task_id}/finalize-compact", {})
+        try:
+            status = _prediction_request("GET", f"/v1/tasks/{task_id}")
+            if status.get("status") != "COMPLETED" or not status.get("prediction_commit"):
+                status = _prediction_request("POST", f"/v1/tasks/{task_id}/finalize-compact", {})
+        except HTTPException as exc:
+            if _is_transient_gateway_error(exc):
+                return _range_retry_response(request, "completeReplayRange", exc.detail)
+            raise
         commit = status.get("prediction_commit") or {}
         if not commit.get("prediction_commit_id"):
             raise HTTPException(status_code=409, detail=f"RANGE_COMMIT_MISSING:{task_id}")

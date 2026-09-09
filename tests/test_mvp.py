@@ -281,7 +281,9 @@ class MVPTests(unittest.TestCase):
                                   "content": "赛前证据"}],
                 }]}
             task_id = path.rsplit("/", 1)[-1]
-            return {"id": task_id, "status": "AWAITING_GPT", "blockers": []}
+            day = "2026-08-01" if task_id == task_ids[0] else "2026-08-02"
+            return {"id": task_id, "status": "AWAITING_GPT", "blockers": [],
+                    "payload": {"date": day}}
 
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             response = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
@@ -363,7 +365,10 @@ class MVPTests(unittest.TestCase):
                     "result_mask": {"applied": True}, "identity_check": {"result": "PASS"},
                     "sections": [{"category": "mixed_data", "source_url": "ref", "content": "赛前证据"}],
                 } for n in range(1, 6)]}
-            return {"id": path.rsplit("/", 1)[-1], "status": "AWAITING_GPT", "blockers": []}
+            task_id = path.rsplit("/", 1)[-1]
+            day = "2026-08-01" if task_id == task_ids[0] else "2026-08-02"
+            return {"id": task_id, "status": "AWAITING_GPT", "blockers": [],
+                    "payload": {"date": day}}
 
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             first = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
@@ -400,7 +405,8 @@ class MVPTests(unittest.TestCase):
                     "result_mask": {"applied": True}, "identity_check": {"result": "PASS"},
                     "sections": [],
                 } for n in range(1, 11)]}
-            return {"id": task_ids[0], "status": "AWAITING_GPT", "blockers": []}
+            return {"id": task_ids[0], "status": "AWAITING_GPT", "blockers": [],
+                    "payload": {"date": "2026-08-01"}}
 
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             pages = [backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
@@ -432,7 +438,8 @@ class MVPTests(unittest.TestCase):
                 return {"status": "COMPLETED", "prediction_commit": {"prediction_commit_id": "commit"}}
             if method == "POST":
                 return {}
-            return {"id": task_id, "status": "AWAITING_GPT", "blockers": []}
+            return {"id": task_id, "status": "AWAITING_GPT", "blockers": [],
+                    "payload": {"date": f"2026-08-0{task_ids.index(task_id) + 1}"}}
 
         command = "回测 2026-08-01 至 2026-08-03"
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request), \
@@ -618,6 +625,7 @@ class MVPTests(unittest.TestCase):
             task_id = path.rsplit("/", 1)[-1]
             status = "PARTIAL" if task_id == task_ids[0] else "AWAITING_GPT"
             return {"id": task_id, "status": status,
+                    "payload": {"date": "2026-08-01" if task_id == task_ids[0] else "2026-08-02"},
                     "blockers": ["COLLECTION_INCOMPLETE"] if status == "PARTIAL" else []}
 
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request), \
@@ -642,7 +650,8 @@ class MVPTests(unittest.TestCase):
                     "identity_check": {"result": "PASS"}, "sections": [],
                 }]}
             status = "COLLECTING" if task_id == task_ids[2] else "AWAITING_GPT"
-            return {"id": task_id, "status": status, "blockers": []}
+            return {"id": task_id, "status": status, "blockers": [],
+                    "payload": {"date": "2026-08-0" + str(task_ids.index(task_id) + 1)}}
 
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             page = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
@@ -656,6 +665,84 @@ class MVPTests(unittest.TestCase):
         self.assertEqual(page["next_cursor"], 2)
         self.assertFalse(waiting["ready"])
         self.assertEqual(waiting["pending_task_ids"], [task_ids[2]])
+
+    def test_26_range_transient_gateway_failure_returns_same_cursor_retry(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        task_ids = ["a" * 32]
+        command = "回测 2026-08-01"
+        failure = HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE")
+        with patch.object(backtest_api, "_prediction_request", side_effect=failure):
+            bundle = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command=command, task_ids=task_ids, cursor=3))
+            complete = backtest_api.complete_replay_range(backtest_api.ReplayRangeCompleteRequest(
+                command=command, task_ids=task_ids, cursor=3,
+                p=["4|PASS|P|P|P|P|P|40|DDDDDDDDDDDDD"],
+            ))
+
+        for response, operation in ((bundle, "getReplayRangeBundle"), (complete, "completeReplayRange")):
+            self.assertEqual(response["control_state"], "RETRY_RANGE_BUNDLE" if operation == "getReplayRangeBundle" else "RETRY_RANGE_COMPLETE")
+            self.assertEqual(response["next_operation"], operation)
+            self.assertEqual(response["task_ids"], task_ids)
+            self.assertEqual(response["cursor"], 3)
+            self.assertTrue(response["must_continue"])
+
+    def test_27_transient_partial_creation_retries_without_cancelling_children(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        calls = []
+        def fake_prediction_request(method, path, body=None):
+            calls.append((method, path, body))
+            if "2026-08-07" in body["command"]:
+                raise HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE")
+            replay_date = body["command"].split()[1]
+            return {"task_id": replay_date.replace("-", "") * 2,
+                    "status_url": "/status", "report_url": "/report", "created": True}
+
+        with patch.object(backtest_api, "_find_resumable_replay", return_value=None), \
+                patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            response = backtest_api.create_replay_task(backtest_api.ReplayTaskRequest(
+                request_id="same-request", command="回测 2026-08-06 至 2026-08-08"))
+
+        self.assertEqual(response["execution_status"], "RETRY_REQUIRED")
+        self.assertEqual(response["next_operation"], "createReplayTask")
+        self.assertTrue(response["must_continue"])
+        self.assertFalse(any(path.endswith("/cancel") for _, path, _ in calls))
+
+    def test_28_unknown_task_state_waits_and_wrong_dates_are_rejected(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        task_id = "a" * 32
+        unknown = {"id": task_id, "status": "RETRYING", "blockers": [],
+                   "payload": {"date": "2026-08-06"}}
+        with patch.object(backtest_api, "_prediction_request", return_value=unknown), \
+                patch.object(backtest_api.time, "sleep"):
+            response = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-06", task_ids=[task_id]))
+        self.assertFalse(response["ready"])
+        self.assertEqual(response["control_state"], "WAIT_FOR_DATA")
+
+        wrong = {**unknown, "status": "AWAITING_GPT", "payload": {"date": "2026-08-07"}}
+        with patch.object(backtest_api, "_prediction_request", return_value=wrong), \
+                self.assertRaises(HTTPException) as raised:
+            backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-06", task_ids=[task_id]))
+        self.assertEqual(raised.exception.detail["error"], "RANGE_TASK_DATE_MISMATCH")
+
+    def test_29_gateway_retry_budget_ends_with_precise_context(self):
+        from fastapi import HTTPException
+        from api import backtest_api
+
+        failure = HTTPException(status_code=503, detail="REPLAY_GATEWAY_UNAVAILABLE")
+        with patch.object(backtest_api, "_prediction_request", side_effect=failure), \
+                self.assertRaises(HTTPException) as raised:
+            backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
+                command="回测 2026-08-06", task_ids=["a" * 32], retry_attempt=4))
+        self.assertEqual(raised.exception.detail["error"], "REPLAY_GATEWAY_RETRY_EXHAUSTED")
+        self.assertEqual(raised.exception.detail["stage"], "getReplayRangeBundle")
 
 
 if __name__ == "__main__":
