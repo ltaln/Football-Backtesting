@@ -320,7 +320,7 @@ class MVPTests(unittest.TestCase):
         paths = {route.path for route in backtest_api.app.routes}
         self.assertTrue({"/replay/range/bundle", "/replay/range/complete"} <= paths)
         complete_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeCompleteRequest"]
-        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 15)
+        self.assertEqual(complete_schema["properties"]["p"]["maxItems"], 12)
         report_schema = backtest_api.app.openapi()["components"]["schemas"]["ReplayRangeReportPageResponse"]
         self.assertIn("must_continue", report_schema["required"])
 
@@ -374,11 +374,11 @@ class MVPTests(unittest.TestCase):
             first = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=0))
             second = backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
-                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=15))
-        self.assertEqual([item["k"] for item in first["matches"]], list(range(1, 16)))
-        self.assertEqual(first["next_cursor"], 15)
+                command="回测 2026-08-01 至 2026-08-02", task_ids=task_ids, cursor=12))
+        self.assertEqual([item["k"] for item in first["matches"]], list(range(1, 13)))
+        self.assertEqual(first["next_cursor"], 12)
         self.assertTrue(first["has_more"])
-        self.assertEqual([item["k"] for item in second["matches"]], list(range(16, 21)))
+        self.assertEqual([item["k"] for item in second["matches"]], list(range(13, 21)))
         self.assertIsNone(second["prediction_prompt_bundle"])
 
         class FakeManager:
@@ -411,14 +411,14 @@ class MVPTests(unittest.TestCase):
         with patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
             pages = [backtest_api.get_replay_range_bundle(backtest_api.ReplayRangeRequest(
                 command="回测 2026-08-01", task_ids=task_ids, cursor=cursor
-            )) for cursor in (0, 15)]
+            )) for cursor in (0, 12)]
 
-        self.assertEqual([page["cursor"] for page in pages], [0, 15])
-        self.assertEqual([page["next_cursor"] for page in pages], [15, None])
+        self.assertEqual([page["cursor"] for page in pages], [0, 12])
+        self.assertEqual([page["next_cursor"] for page in pages], [12, None])
         self.assertTrue(all(page["ready"] for page in pages))
         self.assertTrue(all(page["control_state"] == "PREDICT_AND_SUBMIT" for page in pages))
         self.assertTrue(all(page["next_operation"] == "completeReplayRange" for page in pages))
-        self.assertEqual([len(page["matches"]) for page in pages], [15, 5])
+        self.assertEqual([len(page["matches"]) for page in pages], [12, 8])
 
     def test_22_range_completion_inlines_six_match_pages_for_33_matches(self):
         from api import backtest_api
@@ -468,7 +468,7 @@ class MVPTests(unittest.TestCase):
                 cursor = result["cursor"]
 
         self.assertEqual(len(responses), 4)
-        self.assertEqual([response["cursor"] for response in responses[:-1]], [0, 15, 30])
+        self.assertEqual([response["cursor"] for response in responses[:-1]], [0, 12, 24])
         self.assertEqual(responses[0]["control_state"], "PREDICT_AND_SUBMIT")
         self.assertEqual(responses[-1]["status"], "REPORT_READY")
 
