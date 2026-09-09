@@ -442,17 +442,42 @@ def _resume_active_replay(existing: dict, command) -> dict:
 
 def _find_resumable_replay(command) -> dict | None:
     normalized = _normalized_replay_command(command)
-    existing = get_manager().db.get_active_replay_run(normalized)
+    database = get_manager().db
     expected = (command.end_date - command.start_date).days + 1
+    expected_dates = [
+        (command.start_date + timedelta(days=offset)).isoformat() for offset in range(expected)
+    ]
+    healthy_statuses = {
+        "CREATED", "CHECKING_DATA", "STARTUP_CHECK", "COLLECTING", "SANITIZING",
+        "SNAPSHOT_READY", "RUNNING", "EVALUATING", "AWAITING_GPT", "COMPLETED", "REPORT_READY",
+    }
+    existing = database.get_active_replay_run(normalized)
     if not existing:
+        for candidate in database.list_active_replay_runs():
+            task_ids = candidate.get("task_ids", [])
+            if len(task_ids) != expected:
+                continue
+            matched = True
+            for task_id, expected_date in zip(task_ids, expected_dates):
+                try:
+                    status = _prediction_request("GET", f"/v1/tasks/{task_id}")
+                except HTTPException as exc:
+                    if exc.status_code in {400, 404, 410}:
+                        matched = False
+                        break
+                    raise
+                payload = status.get("payload") if isinstance(status.get("payload"), dict) else {}
+                if status.get("status") not in healthy_statuses or payload.get("date") != expected_date:
+                    matched = False
+                    break
+            if matched:
+                database.update_replay_run_command(candidate["range_run_id"], normalized)
+                candidate["command"] = normalized
+                return candidate
         return None
     task_ids = existing.get("task_ids", [])
     stale = len(task_ids) != expected
     if not stale:
-        healthy_statuses = {
-            "CREATED", "CHECKING_DATA", "STARTUP_CHECK", "COLLECTING", "SANITIZING",
-            "SNAPSHOT_READY", "RUNNING", "EVALUATING", "AWAITING_GPT", "COMPLETED", "REPORT_READY",
-        }
         for task_id in task_ids:
             try:
                 status = _prediction_request("GET", f"/v1/tasks/{task_id}")
@@ -470,7 +495,7 @@ def _find_resumable_replay(command) -> dict | None:
                 _prediction_request("POST", f"/v1/tasks/{task_id}/cancel", {})
             except HTTPException:
                 pass
-        get_manager().db.retire_replay_run(existing["range_run_id"])
+        database.retire_replay_run(existing["range_run_id"])
         return None
     return existing
 

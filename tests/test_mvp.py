@@ -544,6 +544,38 @@ class MVPTests(unittest.TestCase):
         ])
         self.assertIsNotNone(database.get_active_replay_run(command))
 
+    def test_25_mojibake_active_command_resumes_by_exact_payload_dates(self):
+        from api import backtest_api
+        from database.db import Database
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = Database(Path(temporary.name) / "db.sqlite3")
+        task_ids = ["1" * 32, "2" * 32, "3" * 32]
+        mojibake = "�ز� 2026-08-03�� 2026-08-05"
+        normalized = "回测 2026-08-03 至 2026-08-05"
+        database.activate_replay_run("range-mojibake", "parent-old", mojibake, task_ids)
+
+        class Manager:
+            db = database
+
+        calls = []
+        def fake_prediction_request(method, path, body=None):
+            calls.append((method, path))
+            task_id = path.rsplit("/", 1)[-1]
+            dates = dict(zip(task_ids, ["2026-08-03", "2026-08-04", "2026-08-05"]))
+            return {"id": task_id, "status": "AWAITING_GPT", "payload": {"date": dates[task_id]}}
+
+        with patch.object(backtest_api, "get_manager", return_value=Manager()), \
+                patch.object(backtest_api, "_prediction_request", side_effect=fake_prediction_request):
+            response = backtest_api.create_replay_task(backtest_api.ReplayTaskRequest(
+                request_id="new-parent", command=normalized))
+
+        self.assertEqual(response["execution_status"], "RESUMED")
+        self.assertEqual([item["task_id"] for item in response["tasks"]], task_ids)
+        self.assertFalse(any(method == "POST" and path == "/v1/tasks" for method, path in calls))
+        self.assertEqual(database.get_active_replay_run(normalized)["command"], normalized)
+
     def test_17_backtest_status_falls_back_to_persisted_replay_task(self):
         from api import backtest_api
 

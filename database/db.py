@@ -90,6 +90,26 @@ class Database:
         result["task_ids"] = json.loads(result.pop("task_ids_json"))
         return result
 
+    def list_active_replay_runs(self) -> list[dict]:
+        with self.session() as db:
+            rows = db.execute(
+                "SELECT range_run_id, parent_request_id, command, task_ids_json "
+                "FROM replay_range_runs WHERE status='ACTIVE' ORDER BY created_time DESC"
+            ).fetchall()
+        runs = []
+        for row in rows:
+            result = dict(row)
+            result["task_ids"] = json.loads(result.pop("task_ids_json"))
+            runs.append(result)
+        return runs
+
+    def update_replay_run_command(self, range_run_id: str, command: str) -> None:
+        with self.session() as db:
+            db.execute(
+                "UPDATE replay_range_runs SET command=? WHERE range_run_id=? AND status='ACTIVE'",
+                (command, range_run_id),
+            )
+
     def retire_replay_run(self, range_run_id: str, status: str = "STALE") -> None:
         with self.session() as db:
             db.execute(
