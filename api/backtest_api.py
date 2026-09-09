@@ -1272,16 +1272,23 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             index.append((task_id, item))
     if request.cursor >= len(index):
         raise HTTPException(status_code=422, detail="RANGE_CURSOR_INVALID")
-    page_end = min(request.cursor + RANGE_PAGE_SIZE, len(index))
-    page_keys = set(range(request.cursor + 1, page_end + 1))
+    max_page_end = min(request.cursor + RANGE_PAGE_SIZE, len(index))
     supplied = {}
     for line in request.p:
         key, values, module_codes = _decode_ultra(line)
         if key in supplied:
             raise HTTPException(status_code=422, detail=f"RANGE_PREDICTION_DUPLICATE:{key}")
         supplied[key] = (values, module_codes)
-    if set(supplied) != page_keys:
+    supplied_keys = sorted(supplied)
+    if (not supplied_keys
+            or supplied_keys != list(range(request.cursor + 1, supplied_keys[-1] + 1))
+            or supplied_keys[-1] > max_page_end):
         raise HTTPException(status_code=422, detail="RANGE_PREDICTION_SET_INCOMPLETE")
+    # Accept a complete contiguous prefix when the model omits only the tail of
+    # a page. No match is skipped: the next response starts at the first
+    # unsupplied key.
+    page_end = supplied_keys[-1]
+    page_keys = set(supplied_keys)
 
     grouped: dict[str, list[dict]] = {task_id: [] for task_id in request.task_ids}
     for key in sorted(page_keys):
