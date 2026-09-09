@@ -64,9 +64,9 @@ class ReplayRangeRequest(BaseModel):
 class ReplayRangeCompleteRequest(ReplayRangeRequest):
     p: list[str] = Field(
         min_length=1,
-        max_length=6,
+        max_length=15,
         description=(
-            "One ultra-compact prediction per returned k, up to six matches in the current range page: "
+            "One ultra-compact prediction per returned k, up to fifteen matches in the current range page: "
             "k|score1,score2,score3|htft1,htft2,htft3|asian|ou|1x2|goals|confidence|13 module codes. "
             "Scores use 1:0; HTFT uses H/D/A pairs; asian H-0.5/A+0.5/P; ou O2.5/U2.5/P; "
             "1x2 H/D/A/HD/AD/P; confidence 0-100; module codes contain only C or D. "
@@ -295,6 +295,7 @@ class ReplayRangeCompleteResponse(BaseModel):
     summary: dict | None = None
     prediction_commit_ids: list[str] = Field(default_factory=list)
     prompt_bundle: dict | None = None
+    report_digest: dict | None = None
     report_url: str | None = None
 
 
@@ -871,6 +872,24 @@ def _range_batches(task_ids: list[str]) -> list[dict]:
     return [_prediction_request("GET", f"/v1/tasks/{task_id}/analysis-batch") for task_id in task_ids]
 
 
+def _saved_range_prefix(statuses: list[dict], batches: list[dict]) -> int:
+    """Recover the global cursor after a lost GPT turn or service restart."""
+    saved_prefix = 0
+    for status, batch in zip(statuses, batches):
+        matches = batch.get("matches", [])
+        if status.get("status") == "COMPLETED":
+            saved_prefix += len(matches)
+            continue
+        saved = set(status.get("saved_match_nos") or [])
+        for item in matches:
+            if item.get("match_no") not in saved:
+                return saved_prefix
+            saved_prefix += 1
+        if len(saved) < len(matches):
+            return saved_prefix
+    return saved_prefix
+
+
 def _ready_range_prefix(task_ids: list[str], statuses: list[dict]) -> tuple[list[str], list[str]]:
     """Return the stable ready date prefix and every task still collecting."""
     ready_states = {"AWAITING_GPT", "COMPLETED"}
@@ -904,7 +923,7 @@ def _validate_range_task_dates(request: ReplayRangeRequest, statuses: list[dict]
 
 # Keep each model-facing action comfortably below tool/context limits while
 # preserving the per-match frozen analysis and the server's 3-item persistence.
-RANGE_PAGE_SIZE = 6
+RANGE_PAGE_SIZE = 15
 REPORT_PAGE_CHARS = 20000
 
 RANGE_OUTPUT_FORMAT = (
@@ -947,6 +966,69 @@ def _range_page_instruction() -> str:
     )
 
 
+def _range_report_digest(report: dict) -> dict:
+    """Keep every match auditable while fitting the final Action response."""
+    matches = []
+    for item in report.get("matches", []):
+        evaluation = item.get("evaluation") or {}
+        prediction_input = item.get("prediction_input") or {}
+        matches.append({
+            "match_id": item.get("match_id"), "match": item.get("match"),
+            "prediction": item.get("prediction"), "actual_result": item.get("actual_result"),
+            "hits": {
+                "score": evaluation.get("score"), "htft": evaluation.get("htft"),
+                "result": evaluation.get("result"), "goal": evaluation.get("goal"),
+            },
+            "error_type": item.get("error_type"),
+            "module_codes": "".join(
+                "C" if module.get("status") == "COMPLETED" else "D"
+                for module in item.get("modules", [])
+            ),
+            "degraded_modules": prediction_input.get("degraded_modules", []),
+            "source_warnings": item.get("source_warnings", []),
+        })
+    return {
+        "summary": report.get("summary", {}),
+        "module_audit": report.get("module_audit", {}),
+        "improvement_plan": report.get("improvement_plan", {}),
+        "matches": matches,
+    }
+
+
+def _finish_range_report(request: ReplayRangeRequest, statuses: list[dict],
+                         saved_keys: list[int], total_matches: int) -> dict:
+    commits = []
+    for task_id, current in zip(request.task_ids, statuses):
+        status = current
+        if status.get("status") != "COMPLETED" or not status.get("prediction_commit"):
+            status = _prediction_request("POST", f"/v1/tasks/{task_id}/finalize-compact", {})
+        commit = status.get("prediction_commit") or {}
+        if not commit.get("prediction_commit_id"):
+            raise HTTPException(status_code=409, detail=f"RANGE_COMMIT_MISSING:{task_id}")
+        commits.append(commit["prediction_commit_id"])
+
+    report = get_manager().run(request.command, commits)
+    get_manager().db.complete_replay_run(request.task_ids)
+    task_id = report["task_id"]
+    return {
+        "status": "REPORT_READY", "control_state": "REPORT_READY", "ready": True,
+        "task_ids": request.task_ids, "cursor": total_matches, "saved_keys": saved_keys,
+        "has_more": False, "total_matches": total_matches,
+        "must_continue": False, "next_operation": "final_response",
+        "instruction": (
+            "The full range is complete. Apply the complete prompt_bundle.content to report_digest and output the "
+            "detailed Chinese final report now, including every match, all 13 modules, A-E causes and recommendations. "
+            "Do not call another operation; the full original report remains stored at report_url."
+        ),
+        "task_id": task_id, "snapshot_id": report["snapshot_id"],
+        "date_range": report["date_range"], "pollution_status": report["pollution_status"],
+        "generated_time": report["generated_time"], "summary": report["summary"],
+        "prediction_commit_ids": commits, "prompt_bundle": _insight_prompt,
+        "report_digest": _range_report_digest(report),
+        "report_url": f"/backtest/report/{task_id}",
+    }
+
+
 @app.post(
     "/replay/range/bundle",
     operation_id="getReplayRangeBundle",
@@ -957,6 +1039,7 @@ def _range_page_instruction() -> str:
 def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(require_token)) -> dict:
     """Collapse range polling and evidence transfer into one repeatable Action."""
     _range_task_ids(request)
+    requested_cursor = request.cursor
     deadline = time.monotonic() + 24
     while True:
         try:
@@ -1004,6 +1087,7 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
             matches.append(_compact_range_match(key, item))
             key += 1
     total_matches = len(matches)
+    request.cursor = max(request.cursor, _saved_range_prefix(statuses[:len(batches)], batches))
     if request.cursor >= total_matches and pending:
         return {
             "ready": False,
@@ -1017,12 +1101,17 @@ def get_replay_range_bundle(request: ReplayRangeRequest, _: None = Security(requ
             ),
         }
     if request.cursor >= total_matches:
-        raise HTTPException(status_code=422, detail="RANGE_CURSOR_INVALID")
+        try:
+            return _finish_range_report(request, statuses, [], total_matches)
+        except HTTPException as exc:
+            if _is_transient_gateway_error(exc):
+                return _range_retry_response(request, "getReplayRangeBundle", exc.detail)
+            raise
     page_matches = matches[request.cursor:request.cursor + RANGE_PAGE_SIZE]
     next_cursor = request.cursor + len(page_matches)
     has_more = next_cursor < total_matches or bool(pending)
     prompt_bundle = (next((batch.get("prompt_bundle") for batch in batches if batch.get("prompt_bundle")), None)
-                     if request.cursor == 0 else None)
+                     if requested_cursor == 0 else None)
     return {
         "ready": True,
         "control_state": "PREDICT_AND_SUBMIT",
@@ -1226,47 +1315,13 @@ def complete_replay_range(request: ReplayRangeCompleteRequest, _: None = Securit
             ),
         }
 
-    commits = []
-    for task_id in request.task_ids:
-        try:
-            status = _prediction_request("GET", f"/v1/tasks/{task_id}")
-            if status.get("status") != "COMPLETED" or not status.get("prediction_commit"):
-                status = _prediction_request("POST", f"/v1/tasks/{task_id}/finalize-compact", {})
-        except HTTPException as exc:
-            if _is_transient_gateway_error(exc):
-                return _range_retry_response(request, "completeReplayRange", exc.detail)
-            raise
-        commit = status.get("prediction_commit") or {}
-        if not commit.get("prediction_commit_id"):
-            raise HTTPException(status_code=409, detail=f"RANGE_COMMIT_MISSING:{task_id}")
-        commits.append(commit["prediction_commit_id"])
-
-    report = get_manager().run(request.command, commits)
-    get_manager().db.complete_replay_run(request.task_ids)
-    task_id = report["task_id"]
-    return {
-        "status": "REPORT_READY",
-        "control_state": "REPORT_READY",
-        "task_ids": request.task_ids,
-        "saved_keys": sorted(page_keys),
-        "has_more": False,
-        "must_continue": True,
-        "next_operation": "getReplayRangeReportPage",
-        "instruction": (
-            "Call getReplayRangeReportPage immediately with this task_id and cursor=0. Continue until has_more=false; "
-            "do not reply before all report pages are read. Then apply the complete prompt_bundle.content and output the "
-            "detailed report without shortening or skipping required sections."
-        ),
-        "task_id": task_id,
-        "snapshot_id": report["snapshot_id"],
-        "date_range": report["date_range"],
-        "pollution_status": report["pollution_status"],
-        "generated_time": report["generated_time"],
-        "summary": report["summary"],
-        "prediction_commit_ids": commits,
-        "prompt_bundle": _insight_prompt,
-        "report_url": f"/backtest/report/{task_id}",
-    }
+    try:
+        refreshed = [_prediction_request("GET", f"/v1/tasks/{task_id}") for task_id in request.task_ids]
+        return _finish_range_report(request, refreshed, sorted(page_keys), len(index))
+    except HTTPException as exc:
+        if _is_transient_gateway_error(exc):
+            return _range_retry_response(request, "completeReplayRange", exc.detail)
+        raise
 
 
 @app.get(
